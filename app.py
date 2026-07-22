@@ -14,11 +14,12 @@ import io
 import requests as _req
 from datetime import datetime, timedelta
 
+import folium
 import numpy as np
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 import matplotlib.pyplot as plt
+from streamlit_folium import st_folium
 
 from mf_client import (
     DonneesClimatoError,
@@ -51,6 +52,49 @@ SOURCE_LABEL = (
 
 
 # ==============================================================================
+# HELPERS
+# ==============================================================================
+
+def _reverse_geocode(lat, lon):
+    """Retourne (nom_commune, code_dept) depuis des coordonnées."""
+    try:
+        r = _req.get(
+            "https://geo.api.gouv.fr/communes",
+            params={
+                "lat": lat, "lon": lon,
+                "fields": "nom,codeDepartement",
+                "format": "json", "limit": 1,
+            },
+            timeout=8,
+        )
+        if r.ok and r.json():
+            data = r.json()[0]
+            return data.get("nom", ""), data.get("codeDepartement", "")
+    except Exception:
+        pass
+    return "", ""
+
+
+def _fig_png(fig):
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def _afficher(fig, nom_fichier, label_dl="Télécharger ce graphique"):
+    st.pyplot(fig)
+    st.download_button(
+        label=label_dl,
+        data=_fig_png(fig),
+        file_name=nom_fichier,
+        mime="image/png",
+        key=nom_fichier,
+    )
+    plt.close(fig)
+
+
+# ==============================================================================
 # SIDEBAR — ZONE D'ETUDE
 # ==============================================================================
 
@@ -61,15 +105,22 @@ st.sidebar.subheader("Zone d'étude")
 
 mode_saisie = st.sidebar.radio(
     "Mode de saisie",
-    ["Code INSEE", "Coordonnées manuelles"],
+    ["Code INSEE", "Carte", "Coordonnées manuelles"],
     horizontal=True,
 )
+
+# Valeurs persistées en session pour le mode carte
+if "carte_lat" not in st.session_state:
+    st.session_state["carte_lat"] = None
+if "carte_lon" not in st.session_state:
+    st.session_state["carte_lon"] = None
 
 lat_centre  = None
 lon_centre  = None
 code_dept   = None
 nom_commune = None
 
+# --- Mode INSEE ---
 if mode_saisie == "Code INSEE":
     code_insee = st.sidebar.text_input(
         "Code INSEE commune", value="29232", max_chars=5,
@@ -85,40 +136,43 @@ if mode_saisie == "Code INSEE":
         except DonneesClimatoError as e:
             st.sidebar.error(str(e))
 
+# --- Mode Carte ---
+elif mode_saisie == "Carte":
+    if st.session_state["carte_lat"] is not None:
+        lat_centre  = st.session_state["carte_lat"]
+        lon_centre  = st.session_state["carte_lon"]
+        nom_commune, code_dept = _reverse_geocode(lat_centre, lon_centre)
+        st.sidebar.caption(
+            f"Point sélectionné : lat {lat_centre:.4f} / lon {lon_centre:.4f}\n"
+            + (f"{nom_commune} — dept. {code_dept}" if nom_commune else "")
+        )
+        if st.sidebar.button("Réinitialiser le point"):
+            st.session_state["carte_lat"] = None
+            st.session_state["carte_lon"] = None
+            st.rerun()
+    else:
+        st.sidebar.info("Cliquez sur la carte pour choisir un point.")
+
+# --- Mode Coordonnées manuelles ---
 else:
-    lat_centre = st.sidebar.number_input("Latitude",    value=48.39, format="%.4f")
-    lon_centre = st.sidebar.number_input("Longitude",   value=-4.49, format="%.4f")
+    lat_centre = st.sidebar.number_input("Latitude",   value=48.39, format="%.4f")
+    lon_centre = st.sidebar.number_input("Longitude",  value=-4.49, format="%.4f")
     code_dept  = st.sidebar.text_input(
         "Code département", value="29",
         help="2 chiffres, ex. 29 pour le Finistère."
     )
-    # Résolution du nom de commune le plus proche pour les titres
     if lat_centre and lon_centre:
-        try:
-            r = _req.get(
-                "https://geo.api.gouv.fr/communes",
-                params={
-                    "lat": lat_centre, "lon": lon_centre,
-                    "fields": "nom,codeDepartement",
-                    "format": "json", "limit": 1,
-                },
-                timeout=8,
-            )
-            if r.ok and r.json():
-                data = r.json()[0]
-                nom_commune = data.get("nom", "")
-                if not code_dept.strip():
-                    code_dept = data.get("codeDepartement", "")
-            st.sidebar.caption(
-                f"Commune la plus proche : {nom_commune} — dept. {code_dept}"
-            )
-        except Exception:
-            pass
+        nom_commune, dept_auto = _reverse_geocode(lat_centre, lon_centre)
+        if not code_dept.strip():
+            code_dept = dept_auto
+        st.sidebar.caption(
+            f"Commune la plus proche : {nom_commune} — dept. {code_dept}"
+        )
 
 st.sidebar.divider()
 
 # ==============================================================================
-# SIDEBAR — PARAMETRES
+# SIDEBAR — PARAMETRES D'ANALYSE
 # ==============================================================================
 
 n_stations = st.sidebar.slider("Nombre de stations à agréger", 1, 8, 3)
@@ -157,39 +211,66 @@ with st.sidebar.expander("Mode debug"):
 
 
 # ==============================================================================
-# CORPS PRINCIPAL
+# CORPS PRINCIPAL — CARTE
 # ==============================================================================
 
 st.title("QuickExtract Météo — Données horaires récentes")
 st.caption(SOURCE_LABEL)
 
-# Carte de visualisation du point (lecture seule, toujours visible si coords connues)
+# Centre initial de la carte
+if mode_saisie == "Carte":
+    centre_carte = (
+        [st.session_state["carte_lat"], st.session_state["carte_lon"]]
+        if st.session_state["carte_lat"] else [46.5, 2.5]
+    )
+    zoom_carte = 10 if st.session_state["carte_lat"] else 5
+elif lat_centre:
+    centre_carte = [lat_centre, lon_centre]
+    zoom_carte   = 10
+else:
+    centre_carte = [46.5, 2.5]
+    zoom_carte   = 5
+
+m = folium.Map(location=centre_carte, zoom_start=zoom_carte, tiles="OpenStreetMap")
+
+# Marqueur du point sélectionné
 if lat_centre and lon_centre:
-    popup = (nom_commune or "Point d'étude").replace("'", "\\'")
-    carte_html = f"""<!DOCTYPE html><html><head>
-      <meta charset="utf-8"/>
-      <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-      <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-      <style>body{{margin:0;padding:0;}} #map{{width:100%;height:260px;}}</style>
-    </head><body><div id="map"></div><script>
-      var map = L.map('map').setView([{lat_centre},{lon_centre}],10);
-      L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png',{{
-        attribution:'OpenStreetMap contributors'}}).addTo(map);
-      L.marker([{lat_centre},{lon_centre}]).addTo(map).bindPopup('{popup}').openPopup();
-    </script></body></html>"""
-    components.html(carte_html, height=265, scrolling=False)
+    folium.Marker(
+        location=[lat_centre, lon_centre],
+        popup=nom_commune or "Point d'étude",
+        icon=folium.Icon(color="blue", icon="info-sign"),
+    ).add_to(m)
+
+# Affichage de la carte — renvoie le dernier clic en mode Carte
+carte_result = st_folium(
+    m,
+    width="100%",
+    height=300,
+    returned_objects=["last_clicked"] if mode_saisie == "Carte" else [],
+    key="carte_principale",
+)
+
+# Mise à jour des coordonnées si clic en mode Carte
+if mode_saisie == "Carte" and carte_result and carte_result.get("last_clicked"):
+    clic = carte_result["last_clicked"]
+    new_lat = round(clic["lat"], 6)
+    new_lon = round(clic["lng"], 6)
+    if new_lat != st.session_state.get("carte_lat"):
+        st.session_state["carte_lat"] = new_lat
+        st.session_state["carte_lon"] = new_lon
+        st.rerun()
+
+if mode_saisie == "Carte" and st.session_state["carte_lat"] is None:
+    st.info("Cliquez sur la carte pour définir le point d'étude, puis cliquez sur 'Lancer l'analyse'.")
 
 if not lancer:
-    st.info(
-        "Renseignez les paramètres dans la barre latérale "
-        "puis cliquez sur 'Lancer l'analyse'."
-    )
     st.stop()
 
 if not lat_centre or not lon_centre or not code_dept:
     st.error(
         "Zone d'étude non définie. "
-        "Saisissez un code INSEE valide ou renseignez les coordonnées manuellement."
+        "Choisissez un point sur la carte, saisissez un code INSEE, "
+        "ou renseignez les coordonnées manuellement."
     )
     st.stop()
 
@@ -216,7 +297,6 @@ nom_fichier = (
 n_total = df_brut["NUM_POSTE"].nunique() if "NUM_POSTE" in df_brut.columns else "?"
 st.caption(f"Fichier : {nom_fichier} — {n_total} stations dans le département")
 
-# Stations proches
 df_stations = stations_proches(df_brut, lat_centre, lon_centre, n=n_stations)
 if df_stations.empty:
     st.error("Aucune station identifiée. Activez le mode debug.")
@@ -229,8 +309,7 @@ st.dataframe(
     hide_index=True,
 )
 
-# Filtrage, normalisation, agrégation
-ids = [str(i) for i in df_stations["NUM_POSTE"].tolist()]
+ids      = [str(i) for i in df_stations["NUM_POSTE"].tolist()]
 df_filtre = df_brut[df_brut["NUM_POSTE"].astype(str).isin(ids)]
 
 try:
@@ -285,7 +364,7 @@ if colonne_presente(df_agg, "ff_ms"):
 
 
 # ==============================================================================
-# PREPARATION DES AGREGATS
+# AGREGATS
 # ==============================================================================
 
 titre_base  = nom_commune or f"dept. {code_dept}"
@@ -337,33 +416,10 @@ agg_annuel = (
 
 
 # ==============================================================================
-# HELPERS GRAPHIQUES
-# ==============================================================================
-
-def _fig_png(fig):
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
-    buf.seek(0)
-    return buf.getvalue()
-
-
-def _afficher(fig, nom_fichier, label_dl="Télécharger ce graphique"):
-    st.pyplot(fig)
-    st.download_button(
-        label=label_dl,
-        data=_fig_png(fig),
-        file_name=nom_fichier,
-        mime="image/png",
-        key=nom_fichier,
-    )
-    plt.close(fig)
-
-
-# ==============================================================================
 # GRAPHIQUES SELON LA FENETRE
 # ==============================================================================
 
-# 1. Courbe horaire T° / précip — 24h et 7j (et personnalisée <= 7j)
+# 1. Courbe horaire T° / précip — 24h, 7j, personnalisée <= 7j
 if (
     fenetre in ("24 dernières heures", "7 derniers jours")
     or (fenetre == "Personnalisée" and duree_jours <= 7)
@@ -406,7 +462,6 @@ if (
         df_histo      = agg_journalier.tail(15).reset_index(drop=True)
         label_periode = "15 derniers jours"
     else:
-        # Personnalisée : mensuel si > 31j, journalier sinon
         if duree_jours > 31 and not agg_mensuel.empty:
             df_histo      = agg_mensuel.copy()
             label_periode = "bilan mensuel"
@@ -437,7 +492,7 @@ if (
         t_max=("t_max", "mean"),
     ).reset_index()
     if "precip_tot" in agg_mensuel.columns:
-        p_norm     = agg_mensuel.groupby("mois")["precip_tot"].mean().reset_index(name="precip_tot")
+        p_norm       = agg_mensuel.groupby("mois")["precip_tot"].mean().reset_index(name="precip_tot")
         mensuel_norm = mensuel_norm.merge(p_norm, on="mois")
 
     fig = graphique_thermopluviogramme(
