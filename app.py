@@ -35,7 +35,7 @@ from graphiques import (
     graphique_temp_precip,
     graphique_rose_vents,
     graphique_thermopluviogramme,
-    graphique_histogramme_precip_temp,
+    graphique_histogramme_periode,
     graphique_temperatures_annuelles,
 )
 
