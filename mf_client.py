@@ -22,6 +22,7 @@ import streamlit as st
 
 BASE_URL_HOR = "https://meteofrance.s3.sbg.io.cloud.ovh.net/data/synchro_ftp/BASE/HOR"
 BASE_URL_QUO = "https://meteofrance.s3.sbg.io.cloud.ovh.net/data/synchro_ftp/BASE/QUO"
+BASE_URL_MEN = "https://meteofrance.s3.sbg.io.cloud.ovh.net/data/synchro_ftp/BASE/MEN"
 GEO_API      = "https://geo.api.gouv.fr"
 
 ANNEE_NORMALE_DEBUT = 1991
@@ -98,12 +99,22 @@ def _candidats_quo_recents(dept):
     ]
 
 
-def _candidats_quo_decennaux(dept):
-    """Fichiers couvrant la période de référence 1991-2020."""
+def _candidats_men_decennaux(dept):
+    """
+    Fichiers MENSUELS couvrant 1991-2020.
+    Les fichiers mensuels (BASE/MEN) sont organisés par décennie :
+      M_{dept}_1991-2000.csv.gz, M_{dept}_2001-2010.csv.gz, M_{dept}_2011-2020.csv.gz
+    Ils contiennent directement T°min/moy/max et précipitations mensuelles —
+    parfaits pour calculer des normales sans agrégation supplémentaire.
+    On retourne les 3 décennies + un fichier previous de secours.
+    """
+    a = datetime.datetime.utcnow().year
     return [
-        f"Q_{dept}_1991-2020.csv.gz",
-        f"Q_{dept}_1981-2010.csv.gz",
-        f"Q_{dept}_previous-{ANNEE_NORMALE_DEBUT}-{ANNEE_NORMALE_FIN}.csv.gz",
+        (f"M_{dept}_1991-2000.csv.gz", f"{BASE_URL_MEN}/M_{dept}_1991-2000.csv.gz"),
+        (f"M_{dept}_2001-2010.csv.gz", f"{BASE_URL_MEN}/M_{dept}_2001-2010.csv.gz"),
+        (f"M_{dept}_2011-2020.csv.gz", f"{BASE_URL_MEN}/M_{dept}_2011-2020.csv.gz"),
+        (f"M_{dept}_previous-{a-6}-{a-1}.csv.gz",
+         f"{BASE_URL_MEN}/M_{dept}_previous-{a-6}-{a-1}.csv.gz"),
     ]
 
 
@@ -154,18 +165,23 @@ def telecharger_horaire_departement(code_dept):
 # ==============================================================================
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def telecharger_quotidien_decennal(code_dept):
+def telecharger_mensuel_decennal(code_dept):
     """
-    Télécharge le fichier quotidien couvrant la période de référence 1991-2020.
+    Télécharge les fichiers MENSUELS couvrant 1991-2020 et les concatène.
+    Les fichiers mensuels (BASE/MEN) contiennent directement les agrégats
+    T°min/moy/max et précipitations par mois — aucune agrégation nécessaire.
     Retourne DataFrame ou None si indisponible.
     """
     dept = _normaliser_dept(code_dept)
-    for nom in _candidats_quo_decennaux(dept):
-        df = _telecharger_gz(f"{BASE_URL_QUO}/{nom}")
+    dfs = []
+    for nom, url in _candidats_men_decennaux(dept):
+        df = _telecharger_gz(url)
         if df is not None:
             df["_fichier_source"] = nom
-            return df
-    return None
+            dfs.append(df)
+    if not dfs:
+        return None
+    return pd.concat(dfs, ignore_index=True)
 
 
 # ==============================================================================
@@ -366,31 +382,55 @@ def agreger_multi_stations(df_obs, df_stations):
 # NORMALES DECENNALES 1991-2020
 # ==============================================================================
 
-def calculer_normales(df_decennal, ids_stations):
+def calculer_normales(df_mensuel, ids_stations):
     """
-    Calcule les normales mensuelles 1991-2020 pour les stations données.
-    Retourne un DataFrame avec colonnes : mois, t_moy_norm, t_min_norm,
-    t_max_norm, precip_norm. Retourne None si données insuffisantes.
+    Calcule les normales mensuelles 1991-2020 à partir des fichiers MENSUELS.
+
+    Les fichiers mensuels Météo-France contiennent directement les valeurs
+    agrégées par mois. Colonnes typiques :
+      AAAAMMJJ (date au 1er du mois), NUM_POSTE, TN (T°min), TM (T°moy),
+      TX (T°max), RR (précipitations mensuelles cumulées).
+
+    Retourne DataFrame avec : mois (1-12), t_moy_norm, t_min_norm,
+    t_max_norm, precip_norm. None si données insuffisantes.
     """
-    if df_decennal is None or df_decennal.empty:
+    if df_mensuel is None or df_mensuel.empty:
         return None
 
-    df = df_decennal[
-        df_decennal["NUM_POSTE"].astype(str).isin([str(i) for i in ids_stations])
+    df = df_mensuel[
+        df_mensuel["NUM_POSTE"].astype(str).isin([str(i) for i in ids_stations])
     ].copy()
 
     if df.empty:
         return None
 
-    df = normaliser_variables(df)
+    # Colonnes du fichier mensuel (nomenclature Météo-France BASE/MEN)
+    # TN=min, TM=moy, TX=max, RR=précip. Certains fichiers anciens utilisent
+    # T_MIN, T_MOY, T_MAX — on tente les deux nomenclatures.
+    rename = {}
+    for src, dst in [
+        ("TN", "t_min_src"), ("T_MIN", "t_min_src"), ("TNFD", "t_min_src"),
+        ("TM", "t_moy_src"), ("T_MOY", "t_moy_src"),
+        ("TX", "t_max_src"), ("T_MAX", "t_max_src"), ("TXFD", "t_max_src"),
+        ("RR", "rr_src"),    ("RRAB", "rr_src"),
+    ]:
+        if src in df.columns and dst not in rename.values():
+            rename[src] = dst
+    df = df.rename(columns=rename)
 
-    col_date = next((c for c in df.columns if c.upper().startswith("AAAA")), None)
+    # Colonne date : AAAAMMJJ ou AAAAMM
+    col_date = next(
+        (c for c in df.columns if c.upper().startswith("AAAA")), None
+    )
     if col_date is None:
         return None
 
+    n_chars = df[col_date].astype(str).str.strip().str.len().mode().iloc[0]
+    fmt = "%Y%m%d" if n_chars >= 8 else "%Y%m"
+
     df["date_dt"] = pd.to_datetime(
-        df[col_date].astype(str).str.strip(),
-        format="%Y%m%d", errors="coerce",
+        df[col_date].astype(str).str.strip().str[:8 if fmt == "%Y%m%d" else 6],
+        format=fmt, errors="coerce",
     )
     df = df.dropna(subset=["date_dt"])
     df = df[
@@ -403,13 +443,19 @@ def calculer_normales(df_decennal, ids_stations):
 
     df["mois"] = df["date_dt"].dt.month
 
+    for col in ["t_min_src", "t_moy_src", "t_max_src", "rr_src"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
     agg = {}
-    if colonne_presente(df, "t_celsius"):
-        agg["t_moy_norm"] = ("t_celsius", "mean")
-        agg["t_min_norm"] = ("t_celsius", "min")
-        agg["t_max_norm"] = ("t_celsius", "max")
-    if colonne_presente(df, "rr_mm"):
-        agg["precip_norm"] = ("rr_mm", "sum")
+    if "t_moy_src" in df.columns and df["t_moy_src"].notna().any():
+        agg["t_moy_norm"] = ("t_moy_src", "mean")
+    if "t_min_src" in df.columns and df["t_min_src"].notna().any():
+        agg["t_min_norm"] = ("t_min_src", "mean")
+    if "t_max_src" in df.columns and df["t_max_src"].notna().any():
+        agg["t_max_norm"] = ("t_max_src", "mean")
+    if "rr_src" in df.columns and df["rr_src"].notna().any():
+        agg["precip_norm"] = ("rr_src", "mean")
 
     if not agg:
         return None
