@@ -36,11 +36,7 @@ from graphiques import (
     graphique_temperatures_annuelles,
 )
 
-try:
-    from carte import generer_carte, charger_zone_etude
-    CARTE_OK = True
-except ImportError:
-    CARTE_OK = False
+CARTE_OK = False  # export carte désactivé sur Streamlit Cloud (librairies lourdes)
 
 # ==============================================================================
 # CONFIG
