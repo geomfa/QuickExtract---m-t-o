@@ -107,6 +107,10 @@ if "df_decennal" not in st.session_state:
     st.session_state["df_decennal"] = None
 if "selection" not in st.session_state:
     st.session_state["selection"] = None
+if "analyse_active" not in st.session_state:
+    st.session_state["analyse_active"] = False
+if "lancer_analyse" not in st.session_state:
+    st.session_state["lancer_analyse"] = False
 
 lat_centre = lon_centre = code_dept = nom_commune = None
 
@@ -195,7 +199,13 @@ if CARTE_OK:
     fichier_logo = st.sidebar.file_uploader("Logo (PNG)", type=["png"])
     st.sidebar.divider()
 
-lancer = st.sidebar.button("Lancer l'analyse", type="primary", use_container_width=True)
+if st.sidebar.button("Lancer l'analyse", type="primary", use_container_width=True):
+    # Réinitialise tout l'état et marque l'analyse comme active
+    st.session_state["analyse_active"] = True
+    st.session_state["df_inspect"]     = None
+    st.session_state["df_decennal"]    = None
+    st.session_state["selection"]      = None
+    st.session_state["lancer_analyse"] = False
 
 with st.sidebar.expander("Mode debug"):
     debug_on = st.checkbox("Afficher la structure brute du fichier")
@@ -233,18 +243,13 @@ if mode_saisie == "Carte" and carte_result and carte_result.get("last_clicked"):
         st.session_state["carte_lon"] = new_lon
         st.rerun()
 
-if not lancer:
+if not st.session_state.get("analyse_active"):
+    st.info("Renseignez les paramètres dans la barre latérale puis cliquez sur 'Lancer l\'analyse'.")
     st.stop()
 
 if not lat_centre or not lon_centre or not code_dept:
     st.error("Zone d'étude non définie.")
     st.stop()
-
-# Réinitialisation de l'état si on relance une nouvelle recherche
-if lancer:
-    st.session_state["df_inspect"]  = None
-    st.session_state["df_decennal"] = None
-    st.session_state["selection"]   = None
 
 # ==============================================================================
 # TELECHARGEMENT
@@ -336,10 +341,10 @@ col_nom = "NOM_USUEL" if "NOM_USUEL" in df_inspect.columns else "NUM_POSTE"
 df_stations = df_inspect[df_inspect[col_nom].isin(selection)].copy()
 ids_selec   = df_stations["NUM_POSTE"].tolist()
 
-lancer_analyse = st.button("Lancer l'analyse sur les stations sélectionnées",
-                            type="primary")
+if st.button("Lancer l'analyse sur les stations sélectionnées", type="primary"):
+    st.session_state["lancer_analyse"] = True
 
-if not lancer_analyse:
+if not st.session_state.get("lancer_analyse"):
     st.info("Validez la sélection des stations puis cliquez sur le bouton ci-dessus.")
     st.stop()
 
