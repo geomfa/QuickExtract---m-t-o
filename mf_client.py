@@ -101,21 +101,33 @@ def _candidats_quo_recents(dept):
 
 def _candidats_men_decennaux(dept):
     """
-    Fichiers MENSUELS couvrant 1991-2020.
-    Les fichiers mensuels (BASE/MEN) sont organisés par décennie :
-      M_{dept}_1991-2000.csv.gz, M_{dept}_2001-2010.csv.gz, M_{dept}_2011-2020.csv.gz
-    Ils contiennent directement T°min/moy/max et précipitations mensuelles —
-    parfaits pour calculer des normales sans agrégation supplémentaire.
-    On retourne les 3 décennies + un fichier previous de secours.
+    Fichiers MENSUELS Météo-France (BASE/MEN) couvrant 1991-2020.
+
+    Structure réelle des fichiers mensuels (source : doc Météo-France / meteo.data.gouv) :
+      M_{dept}_{debut}-1949.csv.gz     — historique ancien
+      M_{dept}_previous-1950-2022.csv.gz — 1950 à ~2022, contient 1991-2020
+      M_{dept}_latest-2023-2024.csv.gz   — 2 dernières années
+
+    On cible en priorité le fichier "previous" qui couvre 1991-2020.
+    Le nom exact de la borne haute varie selon les mises à jour annuelles,
+    on teste plusieurs variantes.
     """
     a = datetime.datetime.utcnow().year
-    return [
-        (f"M_{dept}_1991-2000.csv.gz", f"{BASE_URL_MEN}/M_{dept}_1991-2000.csv.gz"),
-        (f"M_{dept}_2001-2010.csv.gz", f"{BASE_URL_MEN}/M_{dept}_2001-2010.csv.gz"),
-        (f"M_{dept}_2011-2020.csv.gz", f"{BASE_URL_MEN}/M_{dept}_2011-2020.csv.gz"),
-        (f"M_{dept}_previous-{a-6}-{a-1}.csv.gz",
-         f"{BASE_URL_MEN}/M_{dept}_previous-{a-6}-{a-1}.csv.gz"),
-    ]
+    candidats = []
+    # previous : borne haute variable selon l'année de mise à jour
+    for fin in range(a - 1, a - 6, -1):
+        candidats.append(
+            (f"M_{dept}_previous-1950-{fin}.csv.gz",
+             f"{BASE_URL_MEN}/M_{dept}_previous-1950-{fin}.csv.gz")
+        )
+    # Variante avec borne basse différente (certains depts commencent après 1950)
+    for debut in range(1950, 1960):
+        for fin in range(a - 1, a - 4, -1):
+            candidats.append(
+                (f"M_{dept}_previous-{debut}-{fin}.csv.gz",
+                 f"{BASE_URL_MEN}/M_{dept}_previous-{debut}-{fin}.csv.gz")
+            )
+    return candidats[:12]  # limiter les tentatives
 
 
 # ==============================================================================
