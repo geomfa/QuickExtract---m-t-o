@@ -185,22 +185,8 @@ st.sidebar.caption(f"Du {date_debut.strftime('%d/%m/%Y %Hh')} "
 
 st.sidebar.divider()
 
-# ==============================================================================
-# SIDEBAR — OPTIONS CARTE
-# ==============================================================================
-
-if CARTE_OK:
-    st.sidebar.subheader("Export cartographique")
-    titre_carte  = st.sidebar.text_input("Titre de la carte", value="")
-    auteur_carte = st.sidebar.text_input("Auteur", value="")
-    fichier_zone = st.sidebar.file_uploader(
-        "Zone d'étude (shp.zip, gpkg, geojson)", type=["zip", "gpkg", "geojson"]
-    )
-    fichier_logo = st.sidebar.file_uploader("Logo (PNG)", type=["png"])
-    st.sidebar.divider()
-
-if st.sidebar.button("Lancer l'analyse", type="primary", use_container_width=True):
-    # Réinitialise tout l'état et marque l'analyse comme active
+if st.sidebar.button("1 — Chercher les stations", type="primary",
+                      use_container_width=True):
     st.session_state["analyse_active"] = True
     st.session_state["df_inspect"]     = None
     st.session_state["df_decennal"]    = None
@@ -341,11 +327,12 @@ col_nom = "NOM_USUEL" if "NOM_USUEL" in df_inspect.columns else "NUM_POSTE"
 df_stations = df_inspect[df_inspect[col_nom].isin(selection)].copy()
 ids_selec   = df_stations["NUM_POSTE"].tolist()
 
-if st.button("Lancer l'analyse sur les stations sélectionnées", type="primary"):
+if st.button("2 — Lancer l'analyse sur les stations sélectionnées",
+              type="primary"):
     st.session_state["lancer_analyse"] = True
 
 if not st.session_state.get("lancer_analyse"):
-    st.info("Validez la sélection des stations puis cliquez sur le bouton ci-dessus.")
+    st.info("Sélectionnez les stations puis cliquez sur '2 — Lancer l\'analyse'.")
     st.stop()
 
 # ==============================================================================
@@ -543,7 +530,20 @@ if (fenetre == "Personnalisée" and duree_ans >= 1.0
 if CARTE_OK:
     st.subheader("Export cartographique")
 
-    gdf_zone  = charger_zone_etude(fichier_zone) if fichier_zone else None
+    with st.expander("Paramètres de la carte", expanded=True):
+        titre_carte  = st.text_input("Titre", value=f"Météo — {titre_base}")
+        auteur_carte = st.text_input("Auteur", value="")
+        col_z, col_l = st.columns(2)
+        fichier_zone = col_z.file_uploader(
+            "Zone d'étude (shp.zip, gpkg, geojson)",
+            type=["zip", "gpkg", "geojson"],
+            key="upload_zone",
+        )
+        fichier_logo = col_l.file_uploader(
+            "Logo (PNG)", type=["png"], key="upload_logo"
+        )
+
+    gdf_zone   = charger_zone_etude(fichier_zone) if fichier_zone else None
     logo_bytes = fichier_logo.read() if fichier_logo else None
 
     if st.button("Générer la carte A5"):
@@ -551,7 +551,7 @@ if CARTE_OK:
             try:
                 png_bytes = generer_carte(
                     df_stations=df_stations,
-                    titre=titre_carte or f"Météo — {titre_base}",
+                    titre=titre_carte,
                     gdf_zone=gdf_zone,
                     logo_bytes=logo_bytes,
                     auteur=auteur_carte,
