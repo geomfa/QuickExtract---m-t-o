@@ -18,7 +18,7 @@ from mf_client import (
     DonneesClimatoError,
     commune_depuis_insee,
     telecharger_horaire_departement,
-    telecharger_quotidien_decennal,
+    telecharger_mensuel_decennal,
     inspecter_stations,
     inspecter_decennales,
     filtrer_periode,
@@ -268,7 +268,7 @@ st.caption(f"Fichier : {nom_fichier} — "
 # Données décennales (téléchargement silencieux, mis en cache session)
 if st.session_state.get("df_decennal") is None:
     with st.spinner("Vérification des normales décennales 1991-2020..."):
-        st.session_state["df_decennal"] = telecharger_quotidien_decennal(code_dept)
+        st.session_state["df_decennal"] = telecharger_mensuel_decennal(code_dept)
 df_decennal = st.session_state["df_decennal"]
 
 # ==============================================================================
@@ -316,7 +316,7 @@ noms_stations = (df_inspect["NOM_USUEL"].tolist()
 
 # Valeur par défaut : 3 premières stations, ou sélection précédente si compatible
 default_sel = (
-    [s for s in st.session_state.get("selection", []) if s in noms_stations]
+    [s for s in (st.session_state.get("selection") or []) if s in noms_stations]
     or noms_stations[:3]
 )
 
