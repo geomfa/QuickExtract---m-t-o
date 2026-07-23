@@ -101,6 +101,12 @@ if "carte_lat" not in st.session_state:
     st.session_state["carte_lat"] = None
 if "carte_lon" not in st.session_state:
     st.session_state["carte_lon"] = None
+if "df_inspect" not in st.session_state:
+    st.session_state["df_inspect"] = None
+if "df_decennal" not in st.session_state:
+    st.session_state["df_decennal"] = None
+if "selection" not in st.session_state:
+    st.session_state["selection"] = None
 
 lat_centre = lon_centre = code_dept = nom_commune = None
 
@@ -234,6 +240,11 @@ if not lat_centre or not lon_centre or not code_dept:
     st.error("Zone d'étude non définie.")
     st.stop()
 
+# Réinitialisation de l'état si on relance une nouvelle recherche
+if lancer:
+    st.session_state["df_inspect"]  = None
+    st.session_state["df_decennal"] = None
+    st.session_state["selection"]   = None
 
 # ==============================================================================
 # TELECHARGEMENT
@@ -254,10 +265,11 @@ nom_fichier = df_brut["_fichier_source"].iloc[0] if "_fichier_source" in df_brut
 st.caption(f"Fichier : {nom_fichier} — "
            f"{df_brut['NUM_POSTE'].nunique()} stations dans le département")
 
-# Données décennales (téléchargement silencieux)
-with st.spinner("Vérification des normales décennales 1991-2020..."):
-    df_decennal = telecharger_quotidien_decennal(code_dept)
-
+# Données décennales (téléchargement silencieux, mis en cache session)
+if st.session_state.get("df_decennal") is None:
+    with st.spinner("Vérification des normales décennales 1991-2020..."):
+        st.session_state["df_decennal"] = telecharger_quotidien_decennal(code_dept)
+df_decennal = st.session_state["df_decennal"]
 
 # ==============================================================================
 # ETAPE 1 : SELECTION DES STATIONS
@@ -265,11 +277,13 @@ with st.spinner("Vérification des normales décennales 1991-2020..."):
 
 st.subheader("Étape 1 — Sélection des stations")
 
-n_inspect = st.slider("Nombre de stations à inspecter autour du point", 3, 20, 10)
-
-with st.spinner("Inspection des stations..."):
-    df_inspect = inspecter_stations(df_brut, lat_centre, lon_centre, n=n_inspect)
-    df_inspect = inspecter_decennales(df_inspect, df_decennal)
+# Inspection mise en cache dans session_state pour éviter le recalcul
+if st.session_state.get("df_inspect") is None:
+    with st.spinner("Inspection des stations..."):
+        df_inspect = inspecter_stations(df_brut, lat_centre, lon_centre, n=10)
+        df_inspect = inspecter_decennales(df_inspect, df_decennal)
+        st.session_state["df_inspect"] = df_inspect
+df_inspect = st.session_state["df_inspect"]
 
 # Affichage du tableau d'inspection
 cols_affich = [c for c in [
@@ -289,21 +303,30 @@ df_display.rename(columns={
     "decennales_dispo":  "Normales 91-20",
 }, inplace=True)
 
-# Indicateurs booléens en texte
 for col in ["Nébulosité", "Normales 91-20"]:
     if col in df_display.columns:
         df_display[col] = df_display[col].map({True: "oui", False: "non"})
 
 st.dataframe(df_display, use_container_width=True, hide_index=True)
 
-# Sélection des stations
-noms_stations = df_inspect["NOM_USUEL"].tolist() \
-    if "NOM_USUEL" in df_inspect.columns else df_inspect["NUM_POSTE"].tolist()
+# Sélection des stations — stockée en session pour ne pas perdre la sélection
+noms_stations = (df_inspect["NOM_USUEL"].tolist()
+                 if "NOM_USUEL" in df_inspect.columns
+                 else df_inspect["NUM_POSTE"].tolist())
+
+# Valeur par défaut : 3 premières stations, ou sélection précédente si compatible
+default_sel = (
+    [s for s in st.session_state.get("selection", []) if s in noms_stations]
+    or noms_stations[:3]
+)
+
 selection = st.multiselect(
     "Choisissez les stations à utiliser pour l'analyse :",
     options=noms_stations,
-    default=noms_stations[:3],
+    default=default_sel,
+    key="multiselect_stations",
 )
+st.session_state["selection"] = selection
 
 if not selection:
     st.warning("Sélectionnez au moins une station.")
@@ -313,8 +336,12 @@ col_nom = "NOM_USUEL" if "NOM_USUEL" in df_inspect.columns else "NUM_POSTE"
 df_stations = df_inspect[df_inspect[col_nom].isin(selection)].copy()
 ids_selec   = df_stations["NUM_POSTE"].tolist()
 
-st.caption(f"{len(df_stations)} station(s) sélectionnée(s).")
+lancer_analyse = st.button("Lancer l'analyse sur les stations sélectionnées",
+                            type="primary")
 
+if not lancer_analyse:
+    st.info("Validez la sélection des stations puis cliquez sur le bouton ci-dessus.")
+    st.stop()
 
 # ==============================================================================
 # ETAPE 2 : TRAITEMENT
