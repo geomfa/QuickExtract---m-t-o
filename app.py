@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import folium
 import streamlit as st
+import streamlit.components.v1 as _components_v1
 import matplotlib.pyplot as plt
 from streamlit_folium import st_folium
 
@@ -18,9 +19,8 @@ from mf_client import (
     DonneesClimatoError,
     commune_depuis_insee,
     telecharger_horaire_departement,
-    telecharger_mensuel_decennal,
+    telecharger_quotidien_previous,
     inspecter_stations,
-    inspecter_decennales,
     filtrer_periode,
     normaliser_variables,
     agreger_multi_stations,
@@ -36,7 +36,6 @@ from graphiques import (
     graphique_temperatures_annuelles,
 )
 
-CARTE_OK = False  # export carte désactivé sur Streamlit Cloud (librairies lourdes)
 
 # ==============================================================================
 # CONFIG
@@ -99,8 +98,6 @@ if "carte_lon" not in st.session_state:
     st.session_state["carte_lon"] = None
 if "df_inspect" not in st.session_state:
     st.session_state["df_inspect"] = None
-if "df_decennal" not in st.session_state:
-    st.session_state["df_decennal"] = None
 if "selection" not in st.session_state:
     st.session_state["selection"] = None
 if "analyse_active" not in st.session_state:
@@ -185,7 +182,6 @@ if st.sidebar.button("1 — Chercher les stations", type="primary",
                       use_container_width=True):
     st.session_state["analyse_active"] = True
     st.session_state["df_inspect"]     = None
-    st.session_state["df_decennal"]    = None
     st.session_state["selection"]      = None
     st.session_state["lancer_analyse"] = False
 
@@ -248,15 +244,21 @@ if debug_on:
     with st.expander("Structure du fichier source", expanded=True):
         debug_colonnes(df_brut)
 
+# Fichier quotidien historique pour les normales (téléchargé une fois, mis en cache 24h)
+with st.spinner("Chargement des normales (données quotidiennes historiques)..."):
+    df_quot = telecharger_quotidien_previous(code_dept)
+if df_quot is not None:
+    st.caption(
+        f"Normales : fichier quotidien {df_quot['_fichier_source'].iloc[0]} chargé."
+    )
+else:
+    st.caption("Normales non disponibles pour ce département (fichier quotidien introuvable).")
+
 nom_fichier = df_brut["_fichier_source"].iloc[0] if "_fichier_source" in df_brut.columns else ""
 st.caption(f"Fichier : {nom_fichier} — "
            f"{df_brut['NUM_POSTE'].nunique()} stations dans le département")
 
-# Données décennales (téléchargement silencieux, mis en cache session)
-if st.session_state.get("df_decennal") is None:
-    with st.spinner("Vérification des normales décennales 1991-2020..."):
-        st.session_state["df_decennal"] = telecharger_mensuel_decennal(code_dept)
-df_decennal = st.session_state["df_decennal"]
+
 
 # ==============================================================================
 # ETAPE 1 : SELECTION DES STATIONS
@@ -268,14 +270,13 @@ st.subheader("Étape 1 — Sélection des stations")
 if st.session_state.get("df_inspect") is None:
     with st.spinner("Inspection des stations..."):
         df_inspect = inspecter_stations(df_brut, lat_centre, lon_centre, n=10)
-        df_inspect = inspecter_decennales(df_inspect, df_decennal)
         st.session_state["df_inspect"] = df_inspect
 df_inspect = st.session_state["df_inspect"]
 
 # Affichage du tableau d'inspection
 cols_affich = [c for c in [
     "NUM_POSTE", "NOM_USUEL", "distance_km", "ALTI",
-    "derniere_date", "fraicheur_jours", "nebulo_dispo", "decennales_dispo"
+    "derniere_date", "fraicheur_jours", "nebulo_dispo"
 ] if c in df_inspect.columns]
 
 df_display = df_inspect[cols_affich].copy()
@@ -287,10 +288,9 @@ df_display.rename(columns={
     "derniere_date":     "Dernière mesure",
     "fraicheur_jours":   "Fraîcheur (j)",
     "nebulo_dispo":      "Nébulosité",
-    "decennales_dispo":  "Normales 91-20",
 }, inplace=True)
 
-for col in ["Nébulosité", "Normales 91-20"]:
+for col in ["Nébulosité"]:
     if col in df_display.columns:
         df_display[col] = df_display[col].map({True: "oui", False: "non"})
 
@@ -358,12 +358,14 @@ if df_agg.empty:
     st.error("Erreur lors de l'agrégation.")
     st.stop()
 
-# Normales décennales pour les stations sélectionnées
-df_normales = calculer_normales(df_decennal, ids_selec)
+# Normales sur les 10 dernières années (depuis le fichier quotidien historique)
+df_normales = calculer_normales(df_quot, ids_selec, n_annees=10)
 if df_normales is not None:
-    st.caption("Normales 1991-2020 disponibles — superposées sur les graphiques.")
+    an_min = df_normales.attrs.get("annee_min", "")
+    an_max = df_normales.attrs.get("annee_max", "")
+    st.caption(f"Normales calculées sur {an_min}–{an_max} — superposées sur les graphiques.")
 else:
-    st.caption("Normales 1991-2020 non disponibles pour ces stations.")
+    st.caption("Pas assez de données historiques pour calculer des normales.")
 
 st.caption(
     f"{len(df_agg)} pas de temps horaires — "
@@ -523,45 +525,40 @@ if (fenetre == "Personnalisée" and duree_ans >= 1.0
 # EXPORT CARTOGRAPHIQUE
 # ==============================================================================
 
-if CARTE_OK:
-    st.subheader("Export cartographique")
+st.subheader("Export cartographique")
 
-    with st.expander("Paramètres de la carte", expanded=True):
-        titre_carte  = st.text_input("Titre", value=f"Météo — {titre_base}")
-        auteur_carte = st.text_input("Auteur", value="")
-        col_z, col_l = st.columns(2)
-        fichier_zone = col_z.file_uploader(
-            "Zone d'étude (shp.zip, gpkg, geojson)",
-            type=["zip", "gpkg", "geojson"],
-            key="upload_zone",
-        )
-        fichier_logo = col_l.file_uploader(
-            "Logo (PNG)", type=["png"], key="upload_logo"
-        )
+with st.expander("Paramètres de la carte", expanded=False):
+    titre_carte  = st.text_input("Titre", value=f"Météo — {titre_base}")
+    auteur_carte = st.text_input("Auteur", value="")
+    fichier_zone = st.file_uploader(
+        "Zone d'étude (geojson)", type=["geojson"], key="upload_zone"
+    )
+    fichier_logo = st.file_uploader("Logo (PNG)", type=["png"], key="upload_logo")
 
-    gdf_zone   = charger_zone_etude(fichier_zone) if fichier_zone else None
-    logo_bytes = fichier_logo.read() if fichier_logo else None
-
-    if st.button("Générer la carte A5"):
+    if st.button("Générer la carte"):
         with st.spinner("Génération de la carte..."):
             try:
-                png_bytes = generer_carte(
+                from carte_folium import generer_carte_folium, charger_zone_geojson
+                gdf_zone   = charger_zone_geojson(fichier_zone) if fichier_zone else None
+                logo_bytes = fichier_logo.read() if fichier_logo else None
+                html_carte = generer_carte_folium(
                     df_stations=df_stations,
                     titre=titre_carte,
                     gdf_zone=gdf_zone,
                     logo_bytes=logo_bytes,
                     auteur=auteur_carte,
-                    sources="Météo-France, OpenStreetMap contributors",
                 )
-                st.image(png_bytes, use_container_width=True)
+                st.components.v1.html(html_carte, height=500, scrolling=False)
                 st.download_button(
-                    "Télécharger la carte (PNG)",
-                    data=png_bytes,
-                    file_name=f"carte_{prefixe_nom}_{periode_nom}.png",
-                    mime="image/png",
+                    "Télécharger la carte (HTML)",
+                    data=html_carte.encode(),
+                    file_name=f"carte_{prefixe_nom}_{periode_nom}.html",
+                    mime="text/html",
                 )
+            except ImportError:
+                st.error("Module carte_folium manquant.")
             except Exception as e:
-                st.error(f"Erreur lors de la génération de la carte : {e}")
+                st.error(f"Erreur : {e}")
 
 
 # ==============================================================================

@@ -2,14 +2,19 @@
 Client pour les données climatologiques de Météo-France.
 Source : data.gouv.fr (open data, aucun compte requis).
 
-Fichiers horaires  : BASE/HOR/H_{DEPT}_latest-{a1}-{a2}.csv.gz   — fraîcheur J-1/J-2
-Fichiers quotidiens: BASE/QUO/Q_{DEPT}_latest-{a1}-{a2}.csv.gz   — idem, moins volumineux
-Fichiers décennaux : BASE/QUO/Q_{DEPT}_{a1}-{a2}.csv.gz          — historique
+Fichiers horaires  (BASE/HOR) :
+  H_{DEPT}_latest-{a1}-{a2}.csv.gz          — fraîcheur J-1/J-2, ~1-2 ans
+  Colonne date : AAAAMMJJHH (%Y%m%d%H)
+
+Fichiers quotidiens (BASE/QUOT) — pour les normales sur ~10 ans :
+  Q_{DEPT}_latest-{a1}-{a2}_RR-T-Vent.csv.gz   — 2 dernières années
+  Q_{DEPT}_previous-1950-{a}_RR-T-Vent.csv.gz  — 1950 à ~2021, couvre 10 ans
+  Q_{DEPT}_avant-1949_RR-T-Vent.csv.gz          — historique < 1950
+  Colonne date : AAAAMMJJ (%Y%m%d)
+  Variables : T (T°moy), TN (min), TX (max), RR (précip mm)
 
 Format commun : séparateur ';', encodage latin-1.
 Colonnes communes : NUM_POSTE, NOM_USUEL, LAT, LON, ALTI.
-Date horaire  : AAAAMMJJHH  (%Y%m%d%H, heure UTC)
-Date quotidien: AAAAMMJJ    (%Y%m%d)
 """
 
 import io
@@ -20,22 +25,21 @@ import requests
 import pandas as pd
 import streamlit as st
 
-BASE_URL_HOR = "https://meteofrance.s3.sbg.io.cloud.ovh.net/data/synchro_ftp/BASE/HOR"
-BASE_URL_QUO = "https://meteofrance.s3.sbg.io.cloud.ovh.net/data/synchro_ftp/BASE/QUO"
-BASE_URL_MEN = "https://meteofrance.s3.sbg.io.cloud.ovh.net/data/synchro_ftp/BASE/MEN"
+BASE_URL_HOR  = "https://meteofrance.s3.sbg.io.cloud.ovh.net/data/synchro_ftp/BASE/HOR"
+BASE_URL_QUOT = "https://meteofrance.s3.sbg.io.cloud.ovh.net/data/synchro_ftp/BASE/QUOT"
 GEO_API      = "https://geo.api.gouv.fr"
 
-ANNEE_NORMALE_DEBUT = 1991
-ANNEE_NORMALE_FIN   = 2020
 
 COLONNES_METEO = {
-    "t_celsius": ["T"],
+    "t_celsius": ["TM", "T"],       # TM = T°moy quotidien, T = horaire
+    "t_min":     ["TN"],            # T°min quotidien
+    "t_max":     ["TX"],            # T°max quotidien
     "u_pct":     ["U"],
     "ff_ms":     ["FF"],
     "dd_deg":    ["DD"],
     "fx_ms":     ["FXY", "FX", "FXXY"],
     "rr1_mm":    ["RR1"],
-    "rr_mm":     ["RR"],   # quotidien
+    "rr_mm":     ["RR"],            # précip quotidienne cumulée
     "pmer_hpa":  ["PMER"],
     "n_octas":   ["N"],
     "vv_m":      ["VV"],
@@ -90,44 +94,10 @@ def _candidats_hor(dept):
     ]
 
 
-def _candidats_quo_recents(dept):
-    a = datetime.datetime.utcnow().year
-    return [
-        f"Q_{dept}_latest-{a-1}-{a}.csv.gz",
-        f"Q_{dept}_latest-{a}-{a+1}.csv.gz",
-        f"Q_{dept}_latest-{a-2}-{a-1}.csv.gz",
-    ]
 
 
-def _candidats_men_decennaux(dept):
-    """
-    Fichiers MENSUELS Météo-France (BASE/MEN) couvrant 1991-2020.
 
-    Structure réelle des fichiers mensuels (source : doc Météo-France / meteo.data.gouv) :
-      M_{dept}_{debut}-1949.csv.gz     — historique ancien
-      M_{dept}_previous-1950-2022.csv.gz — 1950 à ~2022, contient 1991-2020
-      M_{dept}_latest-2023-2024.csv.gz   — 2 dernières années
 
-    On cible en priorité le fichier "previous" qui couvre 1991-2020.
-    Le nom exact de la borne haute varie selon les mises à jour annuelles,
-    on teste plusieurs variantes.
-    """
-    a = datetime.datetime.utcnow().year
-    candidats = []
-    # previous : borne haute variable selon l'année de mise à jour
-    for fin in range(a - 1, a - 6, -1):
-        candidats.append(
-            (f"M_{dept}_previous-1950-{fin}.csv.gz",
-             f"{BASE_URL_MEN}/M_{dept}_previous-1950-{fin}.csv.gz")
-        )
-    # Variante avec borne basse différente (certains depts commencent après 1950)
-    for debut in range(1950, 1960):
-        for fin in range(a - 1, a - 4, -1):
-            candidats.append(
-                (f"M_{dept}_previous-{debut}-{fin}.csv.gz",
-                 f"{BASE_URL_MEN}/M_{dept}_previous-{debut}-{fin}.csv.gz")
-            )
-    return candidats[:12]  # limiter les tentatives
 
 
 # ==============================================================================
@@ -173,27 +143,43 @@ def telecharger_horaire_departement(code_dept):
 
 
 # ==============================================================================
-# TELECHARGEMENT QUOTIDIEN (normales décennales)
+# TELECHARGEMENT QUOTIDIEN (normales sur ~10 ans)
 # ==============================================================================
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def telecharger_mensuel_decennal(code_dept):
+def _candidats_quot_previous(dept):
     """
-    Télécharge les fichiers MENSUELS couvrant 1991-2020 et les concatène.
-    Les fichiers mensuels (BASE/MEN) contiennent directement les agrégats
-    T°min/moy/max et précipitations par mois — aucune agrégation nécessaire.
+    Candidats pour le fichier quotidien couvrant 1950-~2021 (RR-T-Vent).
+    Noms réels confirmés par Météo-France :
+      Q_{dept}_previous-1950-{annee}_RR-T-Vent.csv.gz
+    La borne haute varie selon les mises à jour annuelles — on teste plusieurs.
+    """
+    a = datetime.datetime.utcnow().year
+    candidats = []
+    for fin in range(a - 1, a - 8, -1):
+        candidats.append(
+            f"Q_{dept}_previous-1950-{fin}_RR-T-Vent.csv.gz"
+        )
+    # Variante sans suffixe _RR-T-Vent (anciens fichiers)
+    for fin in range(a - 1, a - 4, -1):
+        candidats.append(f"Q_{dept}_previous-1950-{fin}.csv.gz")
+    return candidats
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def telecharger_quotidien_previous(code_dept):
+    """
+    Télécharge le fichier quotidien historique (1950-~2021) pour un département.
+    Utilisé pour calculer les normales sur les 10 dernières années disponibles.
+    Taille typique : 5-20 Mo compressé — bien plus léger qu'un fichier horaire.
     Retourne DataFrame ou None si indisponible.
     """
     dept = _normaliser_dept(code_dept)
-    dfs = []
-    for nom, url in _candidats_men_decennaux(dept):
-        df = _telecharger_gz(url)
+    for nom in _candidats_quot_previous(dept):
+        df = _telecharger_gz(f"{BASE_URL_QUOT}/{nom}")
         if df is not None:
             df["_fichier_source"] = nom
-            dfs.append(df)
-    if not dfs:
-        return None
-    return pd.concat(dfs, ignore_index=True)
+            return df
+    return None
 
 
 # ==============================================================================
@@ -272,20 +258,7 @@ def inspecter_stations(df_brut, lat, lon, n=10):
     return df_sta
 
 
-def inspecter_decennales(df_sta, df_decennal):
-    """
-    Ajoute une colonne 'decennales_dispo' au DataFrame stations
-    indiquant si des données 1991-2020 existent pour chaque station.
-    """
-    if df_decennal is None or df_decennal.empty:
-        df_sta = df_sta.copy()
-        df_sta["decennales_dispo"] = False
-        return df_sta
 
-    ids_dispo = set(df_decennal["NUM_POSTE"].astype(str).unique())
-    df_sta = df_sta.copy()
-    df_sta["decennales_dispo"] = df_sta["NUM_POSTE"].astype(str).isin(ids_dispo)
-    return df_sta
 
 
 # ==============================================================================
@@ -394,85 +367,82 @@ def agreger_multi_stations(df_obs, df_stations):
 # NORMALES DECENNALES 1991-2020
 # ==============================================================================
 
-def calculer_normales(df_mensuel, ids_stations):
+def calculer_normales(df_quot, ids_stations, n_annees=10):
     """
-    Calcule les normales mensuelles 1991-2020 à partir des fichiers MENSUELS.
+    Calcule les normales mensuelles sur les n dernières années disponibles
+    à partir du fichier quotidien historique (Q_dept_previous-1950-XXXX).
 
-    Les fichiers mensuels Météo-France contiennent directement les valeurs
-    agrégées par mois. Colonnes typiques :
-      AAAAMMJJ (date au 1er du mois), NUM_POSTE, TN (T°min), TM (T°moy),
-      TX (T°max), RR (précipitations mensuelles cumulées).
+    Variables utilisées : TM (T°moy), TN (T°min), TX (T°max), RR (précip mm).
+    Agrégation : moyenne mensuelle des T°, cumul mensuel des précip, puis
+    moyenne de ces valeurs mensuelles sur les n dernières années.
 
     Retourne DataFrame avec : mois (1-12), t_moy_norm, t_min_norm,
     t_max_norm, precip_norm. None si données insuffisantes.
     """
-    if df_mensuel is None or df_mensuel.empty:
+    if df_quot is None or df_quot.empty:
         return None
 
-    df = df_mensuel[
-        df_mensuel["NUM_POSTE"].astype(str).isin([str(i) for i in ids_stations])
+    df = df_quot[
+        df_quot["NUM_POSTE"].astype(str).isin([str(i) for i in ids_stations])
     ].copy()
-
     if df.empty:
         return None
 
-    # Colonnes du fichier mensuel (nomenclature Météo-France BASE/MEN)
-    # TN=min, TM=moy, TX=max, RR=précip. Certains fichiers anciens utilisent
-    # T_MIN, T_MOY, T_MAX — on tente les deux nomenclatures.
-    rename = {}
-    for src, dst in [
-        ("TN", "t_min_src"), ("T_MIN", "t_min_src"), ("TNFD", "t_min_src"),
-        ("TM", "t_moy_src"), ("T_MOY", "t_moy_src"),
-        ("TX", "t_max_src"), ("T_MAX", "t_max_src"), ("TXFD", "t_max_src"),
-        ("RR", "rr_src"),    ("RRAB", "rr_src"),
-    ]:
-        if src in df.columns and dst not in rename.values():
-            rename[src] = dst
-    df = df.rename(columns=rename)
+    df = normaliser_variables(df)
 
-    # Colonne date : AAAAMMJJ ou AAAAMM
-    col_date = next(
-        (c for c in df.columns if c.upper().startswith("AAAA")), None
-    )
+    col_date = next((c for c in df.columns if c.upper().startswith("AAAA")), None)
     if col_date is None:
         return None
 
-    n_chars = df[col_date].astype(str).str.strip().str.len().mode().iloc[0]
-    fmt = "%Y%m%d" if n_chars >= 8 else "%Y%m"
-
     df["date_dt"] = pd.to_datetime(
-        df[col_date].astype(str).str.strip().str[:8 if fmt == "%Y%m%d" else 6],
-        format=fmt, errors="coerce",
+        df[col_date].astype(str).str.strip().str[:8],
+        format="%Y%m%d", errors="coerce"
     )
     df = df.dropna(subset=["date_dt"])
-    df = df[
-        (df["date_dt"].dt.year >= ANNEE_NORMALE_DEBUT) &
-        (df["date_dt"].dt.year <= ANNEE_NORMALE_FIN)
-    ]
-
     if df.empty:
         return None
 
-    df["mois"] = df["date_dt"].dt.month
-
-    for col in ["t_min_src", "t_moy_src", "t_max_src", "rr_src"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    agg = {}
-    if "t_moy_src" in df.columns and df["t_moy_src"].notna().any():
-        agg["t_moy_norm"] = ("t_moy_src", "mean")
-    if "t_min_src" in df.columns and df["t_min_src"].notna().any():
-        agg["t_min_norm"] = ("t_min_src", "mean")
-    if "t_max_src" in df.columns and df["t_max_src"].notna().any():
-        agg["t_max_norm"] = ("t_max_src", "mean")
-    if "rr_src" in df.columns and df["rr_src"].notna().any():
-        agg["precip_norm"] = ("rr_src", "mean")
-
-    if not agg:
+    annee_max = df["date_dt"].dt.year.max()
+    annee_min = annee_max - n_annees + 1
+    df = df[df["date_dt"].dt.year >= annee_min].copy()
+    if df.empty:
         return None
 
-    return df.groupby("mois").agg(**agg).reset_index()
+    df["mois"]  = df["date_dt"].dt.month
+    df["annee"] = df["date_dt"].dt.year
+
+    # Agrégation journalière → mensuelle → normale
+    agg_j = {}
+    if colonne_presente(df, "t_celsius"):
+        agg_j["t_moy_j"] = ("t_celsius", "mean")
+    if colonne_presente(df, "t_min"):
+        agg_j["t_min_j"] = ("t_min", "mean")
+    if colonne_presente(df, "t_max"):
+        agg_j["t_max_j"] = ("t_max", "mean")
+    if colonne_presente(df, "rr_mm"):
+        agg_j["rr_j"] = ("rr_mm", "sum")
+    elif colonne_presente(df, "rr1_mm"):
+        agg_j["rr_j"] = ("rr1_mm", "sum")
+
+    if not agg_j:
+        return None
+
+    df_mens = df.groupby(["annee", "mois"]).agg(**agg_j).reset_index()
+
+    agg_norm = {}
+    if "t_moy_j" in df_mens.columns:
+        agg_norm["t_moy_norm"] = ("t_moy_j", "mean")
+    if "t_min_j" in df_mens.columns:
+        agg_norm["t_min_norm"] = ("t_min_j", "mean")
+    if "t_max_j" in df_mens.columns:
+        agg_norm["t_max_norm"] = ("t_max_j", "mean")
+    if "rr_j" in df_mens.columns:
+        agg_norm["precip_norm"] = ("rr_j", "mean")
+
+    result = df_mens.groupby("mois").agg(**agg_norm).reset_index()
+    result.attrs["annee_min"] = int(annee_min)
+    result.attrs["annee_max"] = int(annee_max)
+    return result
 
 
 # ==============================================================================
