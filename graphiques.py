@@ -26,7 +26,6 @@ C_MOY     = "#FF7A1A"   # orange vif — T° moyenne / accents principaux
 C_MAX     = "#E63950"   # corail vif — T° max
 C_MIN     = "#0FA3A3"   # teal vif — T° min
 C_PRECIP  = "#2F8FEF"   # bleu lumineux — précipitations
-C_NORM    = "#9AB11B"   # taupe clair — normales de référence
 
 DEFAULT_LABEL_NORMALE      = "Normale (réf.)"
 DEFAULT_LABEL_NORMALE_VENT = "Normale directionnelle (réf.)"
