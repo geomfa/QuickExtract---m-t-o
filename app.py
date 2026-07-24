@@ -299,7 +299,8 @@ if lat_centre and lon_centre:
     ).add_to(m)
 
 carte_result = st_folium(
-    m, width="100%", height=260,
+    m, height=260,
+    use_container_width=True,
     returned_objects=["last_clicked"] if mode_saisie == "Carte" else [],
     key="carte_principale",
 )
