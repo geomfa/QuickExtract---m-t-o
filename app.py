@@ -176,7 +176,7 @@ if st.sidebar.button(
     use_container_width=True,
     disabled=not zone_definie,
 ):
-    # Réinitialiser l'état si la zone a changé
+    # Réinitialisation de l'état
     st.session_state["code_dept_actif"] = code_dept
     st.session_state["df_brut"]         = None
     st.session_state["df_quot"]         = None
@@ -184,6 +184,25 @@ if st.sidebar.button(
     st.session_state["selection"]       = None
     st.session_state["periode_active"]  = None
     st.session_state["etape"]           = 1
+
+    # Téléchargement immédiat pour que la sidebar étape 2 soit disponible
+    # au prochain run (sinon df_inspect reste None et les widgets n'apparaissent pas)
+    with st.spinner(f"Téléchargement des données — département {code_dept}..."):
+        try:
+            _df_brut = telecharger_horaire_departement(code_dept)
+            st.session_state["df_brut"] = _df_brut
+        except DonneesClimatoError as e:
+            st.sidebar.error(str(e))
+            st.stop()
+    with st.spinner("Chargement des données historiques..."):
+        st.session_state["df_quot"] = telecharger_quotidien_previous(code_dept)
+    _df_quot = st.session_state["df_quot"]
+    with st.spinner("Inspection des stations..."):
+        _df_inspect = inspecter_stations(
+            st.session_state["df_brut"], _df_quot,
+            lat_centre, lon_centre, n=10,
+        )
+        st.session_state["df_inspect"] = _df_inspect
     st.rerun()
 
 if not zone_definie:
@@ -305,18 +324,10 @@ if st.session_state["etape"] == 0:
 # TELECHARGEMENT (déclenché uniquement après clic sur bouton 1)
 # ==============================================================================
 
+# Données déjà téléchargées dans le callback du bouton 1
 if st.session_state["df_brut"] is None:
-    with st.spinner(f"Téléchargement des données horaires — département {st.session_state['code_dept_actif']}..."):
-        try:
-            df_brut = telecharger_horaire_departement(st.session_state["code_dept_actif"])
-            st.session_state["df_brut"] = df_brut
-        except DonneesClimatoError as e:
-            st.error(str(e))
-            st.stop()
-    with st.spinner("Chargement des données historiques (normales)..."):
-        st.session_state["df_quot"] = telecharger_quotidien_previous(
-            st.session_state["code_dept_actif"]
-        )
+    st.error("Données non disponibles. Cliquez sur '1 — Chercher les stations'.")
+    st.stop()
 
 df_brut = st.session_state["df_brut"]
 df_quot = st.session_state["df_quot"]
@@ -338,17 +349,10 @@ st.caption(
 
 st.subheader("Stations disponibles")
 
-if st.session_state["df_inspect"] is None:
-    with st.spinner("Inspection des stations..."):
-        df_inspect = inspecter_stations(
-            df_brut, df_quot,
-            st.session_state["carte_lat"] or lat_centre,
-            st.session_state["carte_lon"] or lon_centre,
-            n=10,
-        )
-        st.session_state["df_inspect"] = df_inspect
-
 df_inspect = st.session_state["df_inspect"]
+if df_inspect is None:
+    st.error("Inspection des stations non disponible. Cliquez sur '1 — Chercher les stations'.")
+    st.stop()
 
 cols_affich = [c for c in [
     "NUM_POSTE", "NOM_USUEL", "distance_km", "ALTI",
