@@ -45,6 +45,16 @@ COLONNES_METEO = {
     "vv_m":      ["VV"],
 }
 
+# Colonnes à conserver lors du téléchargement, pour limiter l'empreinte
+# mémoire (les fichiers Météo-France ont 40-60 colonnes, dont de nombreux
+# indicateurs qualité QT/QN/... jamais utilisés par l'app).
+COLONNES_BASE = ["NUM_POSTE", "NOM_USUEL", "LAT", "LON", "ALTI"]
+COLONNES_DATE = ["AAAAMMJJHH", "AAAAMMJJ"]
+COLONNES_UTILES = (
+    COLONNES_BASE + COLONNES_DATE
+    + [c for cands in COLONNES_METEO.values() for c in cands]
+)
+
 
 class DonneesClimatoError(Exception):
     pass
@@ -69,14 +79,33 @@ def _haversine_km(lat1, lon1, lat2, lon2):
     return R * 2 * math.asin(math.sqrt(a))
 
 
-def _telecharger_gz(url):
-    """Télécharge et décompresse un CSV.gz. Retourne DataFrame ou None."""
+def _telecharger_gz(url, colonnes_utiles=None):
+    """
+    Télécharge et décompresse un CSV.gz. Retourne DataFrame ou None.
+
+    Si colonnes_utiles est fourni, ne charge QUE ces colonnes (celles
+    présentes dans le fichier) — réduit fortement l'empreinte mémoire,
+    critique sur les fichiers quotidiens qui couvrent plusieurs décennies.
+    """
     try:
         resp = requests.get(url, timeout=120)
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
         raw = gzip.decompress(resp.content)
+
+        if colonnes_utiles is not None:
+            # Lecture de l'en-tête seul pour déterminer les colonnes réellement présentes
+            entete = pd.read_csv(
+                io.BytesIO(raw), sep=";", encoding="latin-1", nrows=0
+            )
+            usecols = [c for c in colonnes_utiles if c in entete.columns]
+            return pd.read_csv(
+                io.BytesIO(raw), sep=";", encoding="latin-1",
+                low_memory=False, dtype={"NUM_POSTE": str},
+                usecols=usecols,
+            )
+
         return pd.read_csv(
             io.BytesIO(raw), sep=";", encoding="latin-1",
             low_memory=False, dtype={"NUM_POSTE": str},
@@ -129,11 +158,11 @@ def commune_depuis_insee(code_insee):
 # TELECHARGEMENT HORAIRE
 # ==============================================================================
 
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False, max_entries=3)
 def telecharger_horaire_departement(code_dept):
     dept = _normaliser_dept(code_dept)
     for nom in _candidats_hor(dept):
-        df = _telecharger_gz(f"{BASE_URL_HOR}/{nom}")
+        df = _telecharger_gz(f"{BASE_URL_HOR}/{nom}", colonnes_utiles=COLONNES_UTILES)
         if df is not None:
             df["_fichier_source"] = nom
             return df
@@ -165,18 +194,30 @@ def _candidats_quot_previous(dept):
     return candidats
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def telecharger_quotidien_previous(code_dept):
+@st.cache_data(ttl=86400, show_spinner=False, max_entries=3)
+def telecharger_quotidien_previous(code_dept, n_annees=10):
     """
-    Télécharge le fichier quotidien historique (1950-~2021) pour un département.
-    Utilisé pour calculer les normales sur les 10 dernières années disponibles.
-    Taille typique : 5-20 Mo compressé — bien plus léger qu'un fichier horaire.
-    Retourne DataFrame ou None si indisponible.
+    Télécharge le fichier quotidien historique pour un département et ne
+    conserve QUE les n dernières années (par défaut 10) + les colonnes
+    utiles. Le fichier source couvre 1950-~2024 sur toutes les stations
+    du département : sans ce filtrage, il peut représenter plusieurs
+    millions de lignes en mémoire, largement suffisant pour faire sauter
+    le process sur un environnement à mémoire limitée (Streamlit Cloud).
+
+    Retourne DataFrame filtré (n dernières années) ou None si indisponible.
     """
     dept = _normaliser_dept(code_dept)
     for nom in _candidats_quot_previous(dept):
-        df = _telecharger_gz(f"{BASE_URL_QUOT}/{nom}")
+        df = _telecharger_gz(f"{BASE_URL_QUOT}/{nom}", colonnes_utiles=COLONNES_UTILES)
         if df is not None:
+            col_date = next((c for c in df.columns if c.upper().startswith("AAAA")), None)
+            if col_date is not None:
+                annees = pd.to_numeric(
+                    df[col_date].astype(str).str.slice(0, 4), errors="coerce"
+                )
+                annee_max = annees.max()
+                if pd.notna(annee_max):
+                    df = df[annees >= (annee_max - n_annees + 1)].copy()
             df["_fichier_source"] = nom
             return df
     return None
