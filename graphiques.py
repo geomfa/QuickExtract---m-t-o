@@ -1,9 +1,13 @@
 """
 Graphiques météo statiques (matplotlib).
 Chaque fonction retourne une figure matplotlib prête pour st.pyplot().
-Les normales décennales (1991-2020) sont superposées quand disponibles :
-  - plage grisée (t_min_norm / t_max_norm)
-  - courbe en pointillés (t_moy_norm)
+
+Les normales de référence (n dernières années disponibles) sont superposées
+quand fournies :
+  - plage grisée (min-max) + courbe pointillée (moyenne) sur les températures
+  - contour pointillé sur la rose des vents
+Le texte exact de la légende ("Normale 2015-2024" par ex.) est calculé
+dynamiquement en amont (app.py) à partir des années réellement couvertes.
 """
 
 import numpy as np
@@ -16,12 +20,16 @@ SOURCE_LABEL = "Source : Météo-France — Données climatologiques de base (da
 MOIS_LABELS  = ["Jan", "Fév", "Mar", "Avr", "Mai", "Jun",
                  "Jul", "Aoû", "Sep", "Oct", "Nov", "Déc"]
 
-# Couleurs SCE
-C_ORANGE  = "#E07020"
-C_BLEU    = "#4A90D9"
-C_ROUGE   = "#D62728"
-C_VERT    = "#2CA02C"
-C_NORM    = "#888888"   # couleur des normales décennales
+# Palette — volontairement décalée des teintes matplotlib/IA par défaut
+# (rouge/bleu vifs saturés). Tons plus mats, terreux, cohérents entre eux.
+C_MOY     = "#BF6A2E"   # terre cuite — T° moyenne / accents principaux
+C_MAX     = "#9C3B3B"   # brique sombre — T° max
+C_MIN     = "#2E6B72"   # bleu-vert pétrole — T° min
+C_PRECIP  = "#3A7CA5"   # bleu ardoise — précipitations
+C_NORM    = "#6E6259"   # taupe — normales de référence
+
+DEFAULT_LABEL_NORMALE      = "Normale (réf.)"
+DEFAULT_LABEL_NORMALE_VENT = "Normale directionnelle (réf.)"
 
 
 def _source(fig):
@@ -39,33 +47,24 @@ def _fmt_axe_dates(ax, n_points):
     plt.setp(ax.xaxis.get_majorticklabels(), rotation=30, ha="right")
 
 
-def _ajouter_legende_normales(ax, label="Normales 1991-2020"):
-    """Ajoute une entrée de légende pour la plage des normales."""
-    patch = mpatches.Patch(color=C_NORM, alpha=0.18, label=label)
-    handles, labels = ax.get_legend_handles_labels()
-    ax.legend(handles=handles + [patch], labels=labels + [label],
-              loc="upper left", fontsize=9, framealpha=0.9)
-
-
 # ==============================================================================
-# 1. EVOLUTION TEMPERATURE / PRECIPITATIONS
+# 1. EVOLUTION TEMPERATURE / PRECIPITATIONS (vue horaire courte)
 # ==============================================================================
 
 def graphique_temp_precip(df_agg, titre="Évolution température / précipitations",
-                           df_normales=None):
+                           df_normales=None, label_normale=DEFAULT_LABEL_NORMALE):
     """
-    Courbe T° (axe gauche) + barres précip (axe droit).
+    Courbe T° (axe gauche) + barres précip (axe droit), vue horaire.
     df_normales : DataFrame avec mois, t_moy_norm, t_min_norm, t_max_norm (optionnel).
     """
     fig, ax1 = plt.subplots(figsize=(13, 5))
 
     ax1.plot(df_agg["date_dt"], df_agg["t_celsius"],
-             color=C_ROUGE, linewidth=1.6, label="T° (°C)")
-    ax1.set_ylabel("Température (°C)", color=C_ROUGE, fontsize=10)
-    ax1.tick_params(axis="y", labelcolor=C_ROUGE)
+             color=C_MAX, linewidth=1.6, label="T° observée (°C)")
+    ax1.set_ylabel("Température (°C)", color=C_MAX, fontsize=10)
+    ax1.tick_params(axis="y", labelcolor=C_MAX)
     ax1.grid(axis="y", linestyle="--", alpha=0.3)
 
-    # Normales décennales sur la courbe T° : plage mensuelle projetée sur la série
     if df_normales is not None and not df_normales.empty \
             and "t_moy_norm" in df_normales.columns:
         df_plot = df_agg.copy()
@@ -77,19 +76,19 @@ def graphique_temp_precip(df_agg, titre="Évolution température / précipitatio
 
         ax1.plot(df_plot["date_dt"], df_plot["t_moy_norm"],
                  color=C_NORM, linewidth=1.2, linestyle="--",
-                 label="Normale moy. 1991-2020", zorder=2)
+                 label=f"T° moy. {label_normale}", zorder=2)
         if "t_min_norm" in df_plot.columns and "t_max_norm" in df_plot.columns:
             ax1.fill_between(df_plot["date_dt"],
                              df_plot["t_min_norm"], df_plot["t_max_norm"],
                              color=C_NORM, alpha=0.15, zorder=1,
-                             label="Plage normale 1991-2020")
+                             label=f"Plage {label_normale}")
 
     if "rr1_mm" in df_agg.columns and df_agg["rr1_mm"].notna().any():
         ax2 = ax1.twinx()
         ax2.bar(df_agg["date_dt"], df_agg["rr1_mm"],
-                width=0.03, color=C_BLEU, alpha=0.55, label="Précip. (mm/h)")
-        ax2.set_ylabel("Précipitations (mm/h)", color=C_BLEU, fontsize=10)
-        ax2.tick_params(axis="y", labelcolor=C_BLEU)
+                width=0.03, color=C_PRECIP, alpha=0.55, label="Précip. (mm/h)")
+        ax2.set_ylabel("Précipitations (mm/h)", color=C_PRECIP, fontsize=10)
+        ax2.tick_params(axis="y", labelcolor=C_PRECIP)
         ax2.set_ylim(bottom=0)
         lines1, lbl1 = ax1.get_legend_handles_labels()
         lines2, lbl2 = ax2.get_legend_handles_labels()
@@ -109,9 +108,10 @@ def graphique_temp_precip(df_agg, titre="Évolution température / précipitatio
 # ==============================================================================
 
 def graphique_rose_vents(df_agg, titre="Rose des vents", n_secteurs=16,
-                         df_normales_vent=None):
+                         df_normales_vent=None,
+                         label_normale=DEFAULT_LABEL_NORMALE_VENT):
     """
-    Rose des vents polaire colorée par classe de vitesse.
+    Rose des vents polaire colorée par classe de vitesse (dégradé teal).
     Si df_normales_vent est fourni (colonnes secteur, freq_norm),
     superpose la fréquence directionnelle de référence en contour pointillé.
     """
@@ -121,7 +121,8 @@ def graphique_rose_vents(df_agg, titre="Rose des vents", n_secteurs=16,
 
     bins_v   = [0, 2, 5, 8, 11, 17, np.inf]
     labels_v = ["0-2 m/s", "2-5 m/s", "5-8 m/s", "8-11 m/s", "11-17 m/s", ">17 m/s"]
-    couleurs = ["#C6DBEF", "#9ECAE1", "#6BAED6", "#3182BD", "#08519C", "#08306B"]
+    # Dégradé teal — se démarque du bleu générique habituel des roses des vents
+    couleurs = ["#DCEDE8", "#AFD4C9", "#7CB9A8", "#4A9C86", "#237363", "#0F4C40"]
 
     sec_deg = 360 / n_secteurs
     df = df.copy()
@@ -141,10 +142,9 @@ def graphique_rose_vents(df_agg, titre="Rose des vents", n_secteurs=16,
         )
         freqs = counts / len(df) * 100
         ax.bar(theta, freqs, width=np.radians(sec_deg) * 0.88,
-               bottom=bottom, color=couleur, label=cat, alpha=0.92)
+               bottom=bottom, color=couleur, label=cat, alpha=0.95)
         bottom += freqs
 
-    # Superposition des normales directionnelles en contour pointillé
     if df_normales_vent is not None and not df_normales_vent.empty:
         freq_norm = (
             df_normales_vent
@@ -152,12 +152,11 @@ def graphique_rose_vents(df_agg, titre="Rose des vents", n_secteurs=16,
             .reindex(range(n_secteurs), fill_value=0)
             .values
         )
-        # Fermer le polygone
         theta_closed = np.append(theta, theta[0])
         freq_closed  = np.append(freq_norm, freq_norm[0])
         ax.plot(theta_closed, freq_closed,
                 color=C_NORM, linewidth=1.8, linestyle="--",
-                label="Normale dir. (réf.)", zorder=5)
+                label=label_normale, zorder=5)
 
     labels_dir = (
         ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
@@ -177,19 +176,24 @@ def graphique_rose_vents(df_agg, titre="Rose des vents", n_secteurs=16,
 
 
 # ==============================================================================
-# 3. THERMOPLUVIOGRAMME
+# 3. THERMOPLUVIOGRAMME — bilan mensuel (climatologie de la période sélectionnée)
 # ==============================================================================
 
-def graphique_thermopluviogramme(df_mensuel, titre="Thermopluviogramme",
-                                  df_normales=None):
+def graphique_thermopluviogramme(df_mensuel, titre="Thermopluviogramme — bilan mensuel",
+                                  df_normales=None,
+                                  label_normale=DEFAULT_LABEL_NORMALE):
+    """
+    Diagramme ombrothermique mensuel : moyenne des mois observés sur la
+    période sélectionnée (barres pleines + courbes), comparée à la normale
+    de référence (barres et courbe grisées en retrait) si disponible.
+    """
     if df_mensuel.empty:
         return None
 
     x = np.arange(len(df_mensuel))
-    fig, ax1 = plt.subplots(figsize=(13, 6))
+    fig, ax1 = plt.subplots(figsize=(13, 6.5))
     ax2 = ax1.twinx()
 
-    # Normales en fond
     if df_normales is not None and not df_normales.empty \
             and "t_moy_norm" in df_normales.columns:
         norm = df_mensuel.merge(
@@ -200,42 +204,41 @@ def graphique_thermopluviogramme(df_mensuel, titre="Thermopluviogramme",
         )
         if "t_min_norm" in norm.columns and "t_max_norm" in norm.columns:
             ax1.fill_between(x, norm["t_min_norm"], norm["t_max_norm"],
-                             color=C_NORM, alpha=0.15, zorder=1)
-        ax1.plot(x, norm["t_moy_norm"], color=C_NORM, linewidth=1.5,
-                 linestyle="--", label="T° norm. 1991-2020", zorder=2)
+                             color=C_NORM, alpha=0.13, zorder=1)
+        ax1.plot(x, norm["t_moy_norm"], color=C_NORM, linewidth=1.6,
+                 linestyle="--", marker="o", markersize=3,
+                 label=f"T° moy. {label_normale}", zorder=2)
         if "precip_norm" in norm.columns and norm["precip_norm"].notna().any():
-            ax2.bar(x - 0.15, norm["precip_norm"].fillna(0),
-                    color=C_NORM, alpha=0.25, width=0.28,
-                    label="Précip. norm. 1991-2020", zorder=2)
+            ax2.bar(x - 0.16, norm["precip_norm"].fillna(0),
+                    color=C_NORM, alpha=0.35, width=0.30,
+                    label=f"Précip. {label_normale}", zorder=2)
 
-    # Précipitations observées
     p = df_mensuel["precip_tot"].fillna(0).values if "precip_tot" in df_mensuel.columns \
         else np.zeros(len(df_mensuel))
-    ax2.bar(x + 0.15, p, color=C_BLEU, alpha=0.55, width=0.28,
+    ax2.bar(x + 0.16, p, color=C_PRECIP, alpha=0.65, width=0.30,
             label="Précip. observées (mm)", zorder=3)
-    ax2.set_ylabel("Précipitations (mm/mois)", color=C_BLEU, fontsize=10)
-    ax2.tick_params(axis="y", labelcolor=C_BLEU)
-    ax2.set_ylim(0, max(p.max() if len(p) else 1, 1) * 2.8)
+    ax2.set_ylabel("Précipitations (mm/mois)", color=C_PRECIP, fontsize=10)
+    ax2.tick_params(axis="y", labelcolor=C_PRECIP)
+    ax2.set_ylim(0, max(p.max() if len(p) else 1, 1) * 2.6)
 
-    # Températures observées
-    ax1.plot(x, df_mensuel["t_max"], color=C_ROUGE, linewidth=2,
-             marker="o", markersize=5, label="T° max", zorder=4)
-    ax1.plot(x, df_mensuel["t_moy"], color=C_ORANGE, linewidth=2.5,
-             marker="o", markersize=5, label="T° moy.", zorder=4)
-    ax1.plot(x, df_mensuel["t_min"], color="#1F77B4", linewidth=2,
-             marker="o", markersize=5, label="T° min", zorder=4)
+    ax1.plot(x, df_mensuel["t_max"], color=C_MAX, linewidth=2,
+             marker="o", markersize=5, label="T° max observée", zorder=4)
+    ax1.plot(x, df_mensuel["t_moy"], color=C_MOY, linewidth=2.5,
+             marker="o", markersize=5, label="T° moy. observée", zorder=4)
+    ax1.plot(x, df_mensuel["t_min"], color=C_MIN, linewidth=2,
+             marker="o", markersize=5, label="T° min observée", zorder=4)
     ax1.fill_between(x, df_mensuel["t_min"], df_mensuel["t_max"],
-                     alpha=0.07, color=C_ORANGE, zorder=1)
+                     alpha=0.08, color=C_MOY, zorder=1)
 
     ax1.set_ylabel("Température (°C)", fontsize=10)
     ax1.set_xticks(x)
     ax1.set_xticklabels(MOIS_LABELS[:len(df_mensuel)], fontsize=10)
-    ax1.grid(axis="y", linestyle="--", alpha=0.35)
+    ax1.grid(axis="y", linestyle="--", alpha=0.3)
 
     lines1, lbl1 = ax1.get_legend_handles_labels()
     lines2, lbl2 = ax2.get_legend_handles_labels()
     ax1.legend(lines1 + lines2, lbl1 + lbl2,
-               loc="upper left", fontsize=9, framealpha=0.9)
+               loc="upper left", fontsize=9, framealpha=0.92, ncol=2)
     ax1.set_title(titre, fontsize=12, fontweight="bold")
     _source(fig)
     plt.tight_layout()
@@ -243,11 +246,17 @@ def graphique_thermopluviogramme(df_mensuel, titre="Thermopluviogramme",
 
 
 # ==============================================================================
-# 4. HISTOGRAMME JOURNALIER / MENSUEL
+# 4. SUIVI JOURNALIER — précipitations et températures (fenêtres courtes)
 # ==============================================================================
 
-def graphique_histogramme_periode(df, titre="Précipitations et températures",
-                                   df_normales=None):
+def graphique_histogramme_periode(df, titre="Précipitations et températures — suivi journalier",
+                                   df_normales=None,
+                                   label_normale=DEFAULT_LABEL_NORMALE):
+    """
+    Vue journalière (7j, 15j, ou période personnalisée courte) : une barre/
+    point par jour. Distincte du thermopluviogramme qui montre une
+    climatologie mensuelle sur des périodes plus longues.
+    """
     if df.empty or "t_moy" not in df.columns:
         return None
 
@@ -255,7 +264,6 @@ def graphique_histogramme_periode(df, titre="Précipitations et températures",
     fig, ax1 = plt.subplots(figsize=(13, 5))
     x = np.arange(n)
 
-    # Normales superposées si disponibles et si df est indexé par mois
     if df_normales is not None and not df_normales.empty \
             and "mois" in df.columns and "t_moy_norm" in df_normales.columns:
         df_m = df.merge(
@@ -267,30 +275,28 @@ def graphique_histogramme_periode(df, titre="Précipitations et températures",
         if "t_min_norm" in df_m.columns and "t_max_norm" in df_m.columns:
             ax1.fill_between(x, df_m["t_min_norm"], df_m["t_max_norm"],
                              color=C_NORM, alpha=0.15, zorder=1,
-                             label="Plage normale 1991-2020")
+                             label=f"Plage {label_normale}")
         if "t_moy_norm" in df_m.columns:
             ax1.plot(x, df_m["t_moy_norm"], color=C_NORM, linewidth=1.2,
-                     linestyle="--", label="T° norm. 1991-2020", zorder=2)
+                     linestyle="--", label=f"T° moy. {label_normale}", zorder=2)
 
-    # Précipitations
     if "precip_tot" in df.columns and df["precip_tot"].notna().any():
         ax2 = ax1.twinx()
-        ax2.bar(x, df["precip_tot"].fillna(0), color=C_BLEU, alpha=0.55,
+        ax2.bar(x, df["precip_tot"].fillna(0), color=C_PRECIP, alpha=0.6,
                 label="Précip. (mm)", zorder=2)
-        ax2.set_ylabel("Précipitations (mm)", color=C_BLEU, fontsize=10)
-        ax2.tick_params(axis="y", labelcolor=C_BLEU)
+        ax2.set_ylabel("Précipitations (mm)", color=C_PRECIP, fontsize=10)
+        ax2.tick_params(axis="y", labelcolor=C_PRECIP)
         ax2.set_ylim(bottom=0)
 
-    # Températures
-    ax1.plot(x, df["t_moy"], color=C_ORANGE, linewidth=2.2,
+    ax1.plot(x, df["t_moy"], color=C_MOY, linewidth=2.2,
              marker="o", markersize=5, label="T° moy", zorder=3)
     if "t_min" in df.columns and "t_max" in df.columns:
-        ax1.plot(x, df["t_max"], color=C_ROUGE, linewidth=1.5,
+        ax1.plot(x, df["t_max"], color=C_MAX, linewidth=1.5,
                  marker="o", markersize=4, label="T° max", zorder=3)
-        ax1.plot(x, df["t_min"], color="#1F77B4", linewidth=1.5,
+        ax1.plot(x, df["t_min"], color=C_MIN, linewidth=1.5,
                  marker="o", markersize=4, label="T° min", zorder=3)
         ax1.fill_between(x, df["t_min"], df["t_max"],
-                         alpha=0.08, color=C_ORANGE, zorder=1)
+                         alpha=0.08, color=C_MOY, zorder=1)
 
     ax1.set_ylabel("Température (°C)", fontsize=10)
     ax1.grid(axis="y", linestyle="--", alpha=0.3)
@@ -320,40 +326,40 @@ def graphique_histogramme_periode(df, titre="Précipitations et températures",
 # ==============================================================================
 
 def graphique_temperatures_annuelles(df_annuel, titre="Évolution des températures annuelles",
-                                      df_normales=None):
+                                      df_normales=None,
+                                      label_normale=DEFAULT_LABEL_NORMALE):
     if df_annuel.empty:
         return None
 
     fig, ax = plt.subplots(figsize=(12, 5))
     x = df_annuel["annee"].values
 
-    # Normales horizontales (valeur unique sur toute la période)
     if df_normales is not None and not df_normales.empty \
             and "t_moy_norm" in df_normales.columns:
         t_moy_n = df_normales["t_moy_norm"].mean()
         t_min_n = df_normales["t_min_norm"].mean() if "t_min_norm" in df_normales.columns else None
         t_max_n = df_normales["t_max_norm"].mean() if "t_max_norm" in df_normales.columns else None
         ax.axhline(t_moy_n, color=C_NORM, linewidth=1.2, linestyle="--",
-                   label="T° moy. normale 1991-2020", zorder=2)
+                   label=f"T° moy. {label_normale}", zorder=2)
         if t_min_n is not None and t_max_n is not None:
-            ax.axhspan(t_min_n, t_max_n, color=C_NORM, alpha=0.12, zorder=1,
-                       label="Plage normale 1991-2020")
+            ax.axhspan(t_min_n, t_max_n, color=C_NORM, alpha=0.1, zorder=1,
+                       label=f"Plage {label_normale}")
 
     ax.fill_between(x, df_annuel["t_min"], df_annuel["t_max"],
-                    alpha=0.13, color=C_ORANGE, label="Amplitude T°min-T°max")
-    ax.plot(x, df_annuel["t_max"], color=C_ROUGE, linewidth=2,
+                    alpha=0.12, color=C_MOY, label="Amplitude T°min-T°max")
+    ax.plot(x, df_annuel["t_max"], color=C_MAX, linewidth=2,
             marker="o", markersize=5, label="T° max moy. annuelle")
-    ax.plot(x, df_annuel["t_moy"], color=C_ORANGE, linewidth=2.5,
+    ax.plot(x, df_annuel["t_moy"], color=C_MOY, linewidth=2.5,
             marker="o", markersize=6, label="T° moyenne annuelle")
-    ax.plot(x, df_annuel["t_min"], color="#1F77B4", linewidth=2,
+    ax.plot(x, df_annuel["t_min"], color=C_MIN, linewidth=2,
             marker="o", markersize=5, label="T° min moy. annuelle")
 
     ax.set_xlabel("Année", fontsize=10)
     ax.set_ylabel("Température (°C)", fontsize=10)
     ax.set_xticks(x)
     ax.set_xticklabels([str(a) for a in x], rotation=45, ha="right")
-    ax.grid(axis="y", linestyle="--", alpha=0.35)
-    ax.legend(fontsize=9, framealpha=0.9)
+    ax.grid(axis="y", linestyle="--", alpha=0.3)
+    ax.legend(fontsize=9, framealpha=0.92)
     ax.set_title(titre, fontsize=12, fontweight="bold")
     _source(fig)
     plt.tight_layout()
