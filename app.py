@@ -428,6 +428,24 @@ if df_agg.empty:
 df_normales      = calculer_normales(df_quot, ids_selec, n_annees=10)
 df_normales_vent = calculer_normales_vent(df_quot, ids_selec, n_annees=10)
 
+# Libellés dynamiques des normales (années réellement couvertes)
+if df_normales is not None:
+    _an_min = df_normales.attrs.get("annee_min", "")
+    _an_max = df_normales.attrs.get("annee_max", "")
+    label_normale = f"Normale {_an_min}-{_an_max}" if _an_min else "Normale (réf.)"
+else:
+    label_normale = "Normale (réf.)"
+
+if df_normales_vent is not None:
+    _anv_min = df_normales_vent.attrs.get("annee_min", "")
+    _anv_max = df_normales_vent.attrs.get("annee_max", "")
+    label_normale_vent = (
+        f"Normale dir. {_anv_min}-{_anv_max} (vent fort)" if _anv_min
+        else "Normale directionnelle (réf.)"
+    )
+else:
+    label_normale_vent = "Normale directionnelle (réf.)"
+
 # Titres et variables de période
 titre_base  = nom_commune or f"dept. {st.session_state['code_dept_actif']}"
 prefixe_nom = titre_base.replace(" ", "_")
@@ -517,11 +535,12 @@ if (
         df_agg,
         titre=f"Évolution température / précipitations — {titre_base}",
         df_normales=df_normales,
+        label_normale=label_normale,
     )
     _afficher(fig, f"temp_precip_{prefixe_nom}_{periode_nom}.png",
               "Télécharger — T° / Précipitations")
 
-# 2. Rose des vents (toujours, avec normales superposées si disponibles)
+# 2. Rose des vents (toujours, avec normales directionnelles si disponibles)
 if colonne_presente(df_agg, "ff_ms") and colonne_presente(df_agg, "dd_deg"):
     st.subheader("Rose des vents")
     fig = graphique_rose_vents(
@@ -532,44 +551,54 @@ if colonne_presente(df_agg, "ff_ms") and colonne_presente(df_agg, "dd_deg"):
             f"— {df_agg['date_dt'].max().strftime('%d/%m/%Y')})"
         ),
         df_normales_vent=df_normales_vent,
+        label_normale=label_normale_vent,
     )
     if fig:
         _afficher(fig, f"rose_vents_{prefixe_nom}_{periode_nom}.png",
                   "Télécharger — Rose des vents")
+        if df_normales_vent is None:
+            st.caption(
+                "Normale directionnelle non disponible pour ces stations "
+                "(direction du vent absente ou insuffisante dans l'historique)."
+            )
 
-# 3. Histogramme journalier / mensuel — tout sauf 24h
+# 3. Suivi journalier — fenêtres courtes uniquement (7j, 15j, perso <= 31j)
+# Distinct du thermopluviogramme (climatologie mensuelle) pour éviter la
+# redondance sur les longues périodes.
+SEUIL_MENSUEL_JOURS = 31
+
 if (
-    fenetre != "24 dernières heures"
-    and not agg_journalier.empty
-    and colonne_presente(df_agg, "t_celsius")
-):
-    st.subheader("Précipitations et températures — bilan")
+    fenetre in ("7 derniers jours", "15 derniers jours")
+    or (fenetre == "Personnalisée" and duree_jours <= SEUIL_MENSUEL_JOURS)
+) and not agg_journalier.empty and colonne_presente(df_agg, "t_celsius"):
+
+    st.subheader("Précipitations et températures — suivi journalier")
 
     if fenetre == "7 derniers jours":
         df_histo, label_p = agg_journalier.tail(7).reset_index(drop=True), "7 derniers jours"
     elif fenetre == "15 derniers jours":
         df_histo, label_p = agg_journalier.tail(15).reset_index(drop=True), "15 derniers jours"
-    elif duree_jours > 31 and not agg_mensuel.empty:
-        df_histo, label_p = agg_mensuel.copy(), "bilan mensuel"
     else:
         df_histo, label_p = agg_journalier.copy(), f"{duree_jours} jours"
 
     fig = graphique_histogramme_periode(
         df_histo,
-        titre=f"Précipitations et températures ({label_p}) — {titre_base}",
+        titre=f"Précipitations et températures — suivi journalier ({label_p}) — {titre_base}",
         df_normales=df_normales,
+        label_normale=label_normale,
     )
     if fig:
-        _afficher(fig, f"histogramme_{prefixe_nom}_{periode_nom}.png",
-                  "Télécharger — Histogramme")
+        _afficher(fig, f"suivi_journalier_{prefixe_nom}_{periode_nom}.png",
+                  "Télécharger — Suivi journalier")
 
-# 4. Thermopluviogramme — personnalisée >= 30j
+# 4. Thermopluviogramme — climatologie mensuelle (perso > 31j uniquement)
+# Seul graphique mensuel affiché : pas de doublon avec le suivi journalier.
 if (
-    fenetre == "Personnalisée" and duree_jours >= 30
+    fenetre == "Personnalisée" and duree_jours > SEUIL_MENSUEL_JOURS
     and not agg_mensuel.empty
     and colonne_presente(df_agg, "t_celsius")
 ):
-    st.subheader("Thermopluviogramme — normales mensuelles")
+    st.subheader("Thermopluviogramme — bilan mensuel")
     mensuel_norm = agg_mensuel.groupby("mois").agg(
         t_moy=("t_moy", "mean"),
         t_min=("t_min", "mean"),
@@ -580,8 +609,9 @@ if (
         mensuel_norm = mensuel_norm.merge(p_norm, on="mois")
     fig = graphique_thermopluviogramme(
         mensuel_norm,
-        titre=f"Thermopluviogramme — {titre_base}",
+        titre=f"Thermopluviogramme — bilan mensuel — {titre_base}",
         df_normales=df_normales,
+        label_normale=label_normale,
     )
     if fig:
         _afficher(fig, f"thermopluvio_{prefixe_nom}_{periode_nom}.png",
@@ -598,6 +628,7 @@ if (
         agg_annuel,
         titre=f"Évolution des températures annuelles — {titre_base}",
         df_normales=df_normales,
+        label_normale=label_normale,
     )
     if fig:
         _afficher(fig, f"temp_annuelles_{prefixe_nom}_{periode_nom}.png",
