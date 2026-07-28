@@ -25,8 +25,9 @@ import requests
 import pandas as pd
 import streamlit as st
 
-BASE_URL_HOR  = "https://meteofrance.s3.sbg.io.cloud.ovh.net/data/synchro_ftp/BASE/HOR"
-BASE_URL_QUOT = "https://meteofrance.s3.sbg.io.cloud.ovh.net/data/synchro_ftp/BASE/QUOT"
+BASE_URL_HOR       = "https://meteofrance.s3.sbg.io.cloud.ovh.net/data/synchro_ftp/BASE/HOR"
+BASE_URL_QUOT      = "https://meteofrance.s3.sbg.io.cloud.ovh.net/data/synchro_ftp/BASE/QUOT"
+BASE_URL_DECADAGRO = "https://meteofrance.s3.sbg.io.cloud.ovh.net/data/synchro_ftp/BASE/DECADAGRO"
 GEO_API      = "https://geo.api.gouv.fr"
 
 
@@ -43,6 +44,10 @@ COLONNES_METEO = {
     "pmer_hpa":  ["PMER"],
     "n_octas":   ["N"],
     "vv_m":      ["VV"],
+    # ETP officielle Penman-Monteith FAO-56 (fichier décadaire agro) — nom de
+    # colonne non vérifié directement (fichier source inaccessible en test),
+    # plusieurs candidats testés par ordre de probabilité.
+    "etp_officielle_mm": ["ETP", "ETPMON", "ETPP", "ETPPM"],
 }
 
 # Colonnes à conserver lors du téléchargement, pour limiter l'empreinte
@@ -554,6 +559,108 @@ def calculer_normales_vent(df_quot, ids_stations, n_annees=10):
     freq.attrs["annee_min"] = int(annee_min)
     freq.attrs["annee_max"] = int(annee_max)
     return freq
+
+
+# ==============================================================================
+# EVAPOTRANSPIRATION OFFICIELLE (Penman-Monteith, fichier décadaire agro)
+# ==============================================================================
+#
+# Source : "Données climatologiques de base - décadaires agro" (Météo-France),
+# variable ETP calculée selon la formule FAO-56 Penman-Monteith.
+#
+# Aucun calcul de repli n'est effectué si cette source est indisponible —
+# l'app affiche alors "ETP non disponible" plutôt qu'une estimation.
+#
+# ⚠️ Schéma non vérifié directement (fichier source inaccessible en test) :
+# plusieurs noms de colonnes candidats sont testés automatiquement. En cas
+# d'échec silencieux, activer le Mode debug dans l'app pour inspecter les
+# colonnes réelles du fichier téléchargé et ajuster si besoin la liste
+# "etp_officielle_mm" dans COLONNES_METEO ainsi que _candidats_decadagro.
+
+def _candidats_decadagro(dept):
+    """
+    Candidats pour le fichier décadaire agro couvrant l'historique récent.
+    Même logique que _candidats_quot_previous : la borne haute de la période
+    "previous" change chaque année, on teste plusieurs valeurs.
+    """
+    a = datetime.datetime.utcnow().year
+    return [
+        f"DECADAGRO_{dept}_previous-1950-{fin}.csv.gz"
+        for fin in range(a - 1, a - 8, -1)
+    ]
+
+
+@st.cache_data(ttl=86400, show_spinner=False, max_entries=3)
+def telecharger_decadaire_etp(code_dept, n_annees=10):
+    """
+    Télécharge le fichier décadaire agro (ETP officielle Penman-Monteith)
+    pour un département, filtré aux n dernières années disponibles.
+
+    Retourne DataFrame ou None si le fichier est indisponible (auquel cas
+    l'app affiche alors "ETP non disponible").
+    """
+    dept = _normaliser_dept(code_dept)
+    for nom in _candidats_decadagro(dept):
+        df = _telecharger_gz(f"{BASE_URL_DECADAGRO}/{nom}", colonnes_utiles=COLONNES_UTILES)
+        if df is None:
+            continue
+
+        col_date = next((c for c in df.columns if c.upper().startswith("AAAA")), None)
+        if col_date is not None:
+            annees = pd.to_numeric(df[col_date].astype(str).str.slice(0, 4), errors="coerce")
+            annee_max = annees.max()
+            if pd.notna(annee_max):
+                df = df[annees >= (annee_max - n_annees + 1)].copy()
+
+        df["_fichier_source"] = nom
+        return df
+    return None
+
+
+def calculer_etp_officielle_mensuelle(df_decadagro, ids_stations, n_annees=10):
+    """
+    Calcule la moyenne mensuelle de l'ETP officielle (Penman-Monteith) sur
+    les n dernières années, à partir du fichier décadaire agro.
+
+    Retourne DataFrame (mois, etp_officielle_mm) avec attrs annee_min/max,
+    ou None si la colonne ETP n'a pas été reconnue dans le fichier
+    (schéma inattendu) ou si les données sont insuffisantes.
+    """
+    if df_decadagro is None or df_decadagro.empty:
+        return None
+
+    df = df_decadagro[
+        df_decadagro["NUM_POSTE"].astype(str).isin([str(i) for i in ids_stations])
+    ].copy()
+    if df.empty:
+        return None
+
+    df = normaliser_variables(df)
+    if not colonne_presente(df, "etp_officielle_mm"):
+        return None
+
+    col_date = next((c for c in df.columns if c.upper().startswith("AAAA")), None)
+    if col_date is None:
+        return None
+
+    df["annee"] = pd.to_numeric(df[col_date].astype(str).str.slice(0, 4), errors="coerce")
+    df["mois"]  = pd.to_numeric(df[col_date].astype(str).str.slice(4, 6), errors="coerce")
+    df = df.dropna(subset=["annee", "mois"])
+    if df.empty:
+        return None
+
+    annee_max = df["annee"].max()
+    annee_min = annee_max - n_annees + 1
+    df = df[df["annee"] >= annee_min]
+    if df.empty:
+        return None
+
+    # Moyenne décadaire → mensuelle (moyenne des décades du mois) → normale
+    df_mens = df.groupby(["annee", "mois"])["etp_officielle_mm"].mean().reset_index()
+    result  = df_mens.groupby("mois")["etp_officielle_mm"].mean().reset_index()
+    result.attrs["annee_min"] = int(annee_min)
+    result.attrs["annee_max"] = int(annee_max)
+    return result
 
 
 # ==============================================================================

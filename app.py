@@ -20,12 +20,14 @@ from mf_client import (
     commune_depuis_insee,
     telecharger_horaire_departement,
     telecharger_quotidien_previous,
+    telecharger_decadaire_etp,
     inspecter_stations,
     filtrer_periode,
     normaliser_variables,
     agreger_multi_stations,
     calculer_normales,
     calculer_normales_vent,
+    calculer_etp_officielle_mensuelle,
     colonne_presente,
     debug_colonnes,
 )
@@ -447,6 +449,17 @@ if df_normales_vent is not None:
 else:
     label_normale_vent = "Normale directionnelle (réf.)"
 
+# Évapotranspiration officielle Penman-Monteith (fichier décadaire agro
+# Météo-France). Aucun calcul de repli — si indisponible, l'app l'indique
+# clairement plutôt que d'afficher une estimation.
+_df_decadagro   = telecharger_decadaire_etp(st.session_state["code_dept_actif"])
+_etp_officielle = calculer_etp_officielle_mensuelle(_df_decadagro, ids_selec, n_annees=10)
+
+df_etp_normale = (
+    _etp_officielle.rename(columns={"etp_officielle_mm": "etp_normale_mm"})
+    if _etp_officielle is not None else None
+)
+
 # Titres et variables de période
 titre_base  = nom_commune or f"dept. {st.session_state['code_dept_actif']}"
 prefixe_nom = titre_base.replace(" ", "_")
@@ -521,6 +534,8 @@ agg_annuel = (
     df_agg.groupby("annee").agg(**cols_agg).reset_index()
     if not agg_journalier.empty else pd.DataFrame()
 )
+
+df_thermopluvio_export = None  # renseigné si le bilan mensuel est généré
 
 # ==============================================================================
 # GRAPHIQUES
@@ -608,15 +623,32 @@ if (
     if "precip_tot" in agg_mensuel.columns:
         p_norm       = agg_mensuel.groupby("mois")["precip_tot"].mean().reset_index(name="precip_tot")
         mensuel_norm = mensuel_norm.merge(p_norm, on="mois")
+
+    # Évapotranspiration officielle (référence n dernières années), alignée
+    # sur les mêmes mois que mensuel_norm. Pas d'ETP "observée" spécifique à
+    # la période sélectionnée — seule la référence officielle est affichée.
+    etp_norm_series = None
+    if df_etp_normale is not None:
+        _etp_norm_map = dict(zip(df_etp_normale["mois"], df_etp_normale["etp_normale_mm"]))
+        etp_norm_series = [_etp_norm_map.get(m, float("nan")) for m in mensuel_norm["mois"]]
+
     fig = graphique_thermopluviogramme(
         mensuel_norm,
         titre=f"Thermopluviogramme — bilan mensuel — {titre_base}",
         df_normales=df_normales,
         label_normale=label_normale,
+        etp_normale=etp_norm_series,
+        label_etp="ETP officielle Penman-Monteith (Météo-France)",
     )
+    if df_etp_normale is None:
+        st.caption("ETP non disponible pour ces stations.")
     if fig:
         _afficher(fig, f"thermopluvio_{prefixe_nom}_{periode_nom}.png",
                   "Télécharger — Thermopluviogramme")
+
+    df_thermopluvio_export = mensuel_norm.copy()
+    if etp_norm_series is not None:
+        df_thermopluvio_export["etp_normale_mm"] = etp_norm_series
 
 # 5. Évolution T° annuelles — personnalisée >= 1 an
 if (
@@ -695,6 +727,12 @@ with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         agg_annuel.to_excel(writer,     sheet_name="Annuel",     index=False)
     if df_normales is not None:
         df_normales.to_excel(writer,    sheet_name="Normales",   index=False)
+    if df_etp_normale is not None:
+        _df_etp_export = df_etp_normale.copy()
+        _df_etp_export["source"] = "Officielle Penman-Monteith (Météo-France)"
+        _df_etp_export.to_excel(writer, sheet_name="ETP_normale", index=False)
+    if df_thermopluvio_export is not None:
+        df_thermopluvio_export.to_excel(writer, sheet_name="Thermopluvio_mensuel", index=False)
 
 st.download_button(
     "Télécharger l'Excel",
