@@ -303,7 +303,7 @@ if lat_centre and lon_centre:
 carte_result = st_folium(
     m, height=260,
     use_container_width=True,
-    returned_objects=["last_clicked"] if mode_saisie == "Carte" else [],
+    returned_objects=["last_clicked"],  # toujours actif, ignoré si mode != "Carte"
     key="carte_principale",
 )
 
