@@ -37,7 +37,7 @@ COLONNES_METEO = {
     "t_max":     ["TX"],            # T°max quotidien
     "u_pct":     ["U"],
     "ff_ms":     ["FF"],
-    "dd_deg":    ["DD", "DG", "DXY", "DXI"],  # DXY/DXI = direction du vent instantané max (quotidien)
+    "dd_deg":    ["DD"],
     "fx_ms":     ["FXY", "FX", "FXXY"],
     "rr1_mm":    ["RR1"],
     "rr_mm":     ["RR"],            # précip quotidienne cumulée
@@ -494,71 +494,6 @@ def calculer_normales(df_quot, ids_stations, n_annees=10):
     result.attrs["annee_max"] = int(annee_max)
     return result
 
-
-
-# ==============================================================================
-# NORMALES VENT
-# ==============================================================================
-
-def calculer_normales_vent(df_quot, ids_stations, n_annees=10):
-    """
-    Calcule la fréquence directionnelle de référence sur n ans depuis le
-    fichier quotidien. Le fichier quotidien ne contient pas de direction
-    moyenne journalière comme le fichier horaire (colonne DD) : selon les
-    stations, seule la direction du vent instantané maximal est disponible
-    (colonnes DXY/DXI). La normale obtenue reflète donc la tendance
-    directionnelle des épisodes de vent fort, pas la climatologie complète
-    du vent — c'est néanmoins la meilleure référence directionnelle
-    disponible sans re-télécharger un fichier horaire historique (coûteux).
-
-    Retourne DataFrame : secteur (0-15), freq_norm (%), avec attrs
-    annee_min / annee_max. None si aucune colonne direction n'est
-    exploitable ou si le volume de données est insuffisant.
-    """
-    if df_quot is None or df_quot.empty:
-        return None
-
-    df = df_quot[
-        df_quot["NUM_POSTE"].astype(str).isin([str(i) for i in ids_stations])
-    ].copy()
-    if df.empty:
-        return None
-
-    df = normaliser_variables(df)
-    if not colonne_presente(df, "dd_deg"):
-        return None
-
-    col_date = next((c for c in df.columns if c.upper().startswith("AAAA")), None)
-    if col_date is None:
-        return None
-
-    df["date_dt"] = pd.to_datetime(
-        df[col_date].astype(str).str.strip().str[:8],
-        format="%Y%m%d", errors="coerce"
-    )
-    df = df.dropna(subset=["date_dt"])
-    if df.empty:
-        return None
-
-    annee_max = df["date_dt"].dt.year.max()
-    annee_min = annee_max - n_annees + 1
-    df = df[df["date_dt"].dt.year >= annee_min]
-
-    df = df[["dd_deg"]].dropna()
-    if len(df) < 10:
-        return None
-
-    n_secteurs = 16
-    sec_deg    = 360 / n_secteurs
-    df = df.copy()
-    df["secteur"] = ((df["dd_deg"] + sec_deg / 2) % 360 // sec_deg).astype(int).clip(0, n_secteurs - 1)
-    freq = (
-        df.groupby("secteur").size() / len(df) * 100
-    ).reindex(range(n_secteurs), fill_value=0).reset_index()
-    freq.columns = ["secteur", "freq_norm"]
-    freq.attrs["annee_min"] = int(annee_min)
-    freq.attrs["annee_max"] = int(annee_max)
-    return freq
 
 
 # ==============================================================================

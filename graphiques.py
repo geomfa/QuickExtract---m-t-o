@@ -5,16 +5,18 @@ Chaque fonction retourne une figure matplotlib prête pour st.pyplot().
 Les normales de référence (n dernières années disponibles) sont superposées
 quand fournies :
   - plage grisée (min-max) + courbe pointillée (moyenne) sur les températures
-  - contour pointillé sur la rose des vents
 Le texte exact de la légende ("Normale 2015-2024" par ex.) est calculé
 dynamiquement en amont (app.py) à partir des années réellement couvertes.
+
+La rose des vents ne montre que la période analysée (aucune "normale
+directionnelle" — cette donnée n'existe pas de façon fiable dans les
+sources disponibles).
 """
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
-import matplotlib.patches as mpatches
 
 SOURCE_LABEL = "Source : Météo-France — Données climatologiques de base (data.gouv.fr)"
 MOIS_LABELS  = ["Jan", "Fév", "Mar", "Avr", "Mai", "Jun",
@@ -26,10 +28,11 @@ C_MOY     = "#FF7A1A"   # orange vif — T° moyenne / accents principaux
 C_MAX     = "#E63950"   # corail vif — T° max
 C_MIN     = "#0FA3A3"   # teal vif — T° min
 C_PRECIP  = "#2F8FEF"   # bleu lumineux — précipitations
-C_NORM    = "#E60380"   # taupe clair — normales de référence
+C_NORM    = "#8C7A66"   # taupe clair — normales de référence
+C_ETP     = "#4CAF50"   # vert vif — évapotranspiration
+C_BILAN   = "#7B3FA0"   # violet — bilan hydrique (P - ETP)
 
-DEFAULT_LABEL_NORMALE      = "Normale (réf.)"
-DEFAULT_LABEL_NORMALE_VENT = "Normale directionnelle (réf.)"
+DEFAULT_LABEL_NORMALE = "Normale (réf.)"
 
 
 def _source(fig):
@@ -104,17 +107,16 @@ def graphique_temp_precip(df_agg, titre="Évolution température / précipitatio
 
 
 # ==============================================================================
-# 2. ROSE DES VENTS
+# 2. ROSE DES VENTS (période uniquement — pas de normale directionnelle)
 # ==============================================================================
 
-def graphique_rose_vents(df_agg, titre="Rose des vents", n_secteurs=16,
-                         df_normales_vent=None,
-                         label_normale=DEFAULT_LABEL_NORMALE_VENT):
+def graphique_rose_vents(df_agg, titre="Rose des vents", n_secteurs=16):
     """
     Rose des vents polaire colorée par classe de vitesse (dégradé teal).
-    Si df_normales_vent est fourni (colonnes secteur, freq_norm),
-    superpose la fréquence directionnelle de référence en contour pointillé.
+    Retourne None si les données vent sont insuffisantes.
     """
+    if df_agg is None or df_agg.empty:
+        return None
     df = df_agg[["ff_ms", "dd_deg"]].dropna()
     if df.empty or len(df) < 3:
         return None
@@ -130,7 +132,7 @@ def graphique_rose_vents(df_agg, titre="Rose des vents", n_secteurs=16,
     df["cat_v"]   = pd.cut(df["ff_ms"], bins=bins_v, labels=labels_v, right=False)
     theta = np.linspace(0, 2 * np.pi, n_secteurs, endpoint=False)
 
-    fig, ax = plt.subplots(figsize=(8, 8), subplot_kw={"projection": "polar"})
+    fig, ax = plt.subplots(figsize=(7.5, 7.5), subplot_kw={"projection": "polar"})
     ax.set_theta_zero_location("N")
     ax.set_theta_direction(-1)
     bottom = np.zeros(n_secteurs)
@@ -145,19 +147,6 @@ def graphique_rose_vents(df_agg, titre="Rose des vents", n_secteurs=16,
                bottom=bottom, color=couleur, label=cat, alpha=0.95)
         bottom += freqs
 
-    if df_normales_vent is not None and not df_normales_vent.empty:
-        freq_norm = (
-            df_normales_vent
-            .set_index("secteur")["freq_norm"]
-            .reindex(range(n_secteurs), fill_value=0)
-            .values
-        )
-        theta_closed = np.append(theta, theta[0])
-        freq_closed  = np.append(freq_norm, freq_norm[0])
-        ax.plot(theta_closed, freq_closed,
-                color=C_NORM, linewidth=1.8, linestyle="--",
-                label=label_normale, zorder=5)
-
     labels_dir = (
         ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
          "S", "SSO", "SO", "OSO", "O", "ONO", "NO", "NNO"]
@@ -167,10 +156,10 @@ def graphique_rose_vents(df_agg, titre="Rose des vents", n_secteurs=16,
     ax.set_xticks(theta)
     ax.set_xticklabels(labels_dir[:n_secteurs], fontsize=9)
     ax.set_ylabel("Fréquence (%)", labelpad=30, fontsize=9)
-    ax.legend(loc="lower left", bbox_to_anchor=(-0.18, -0.16),
+    ax.legend(loc="lower left", bbox_to_anchor=(-0.2, -0.16),
               title="Vitesse", fontsize=8, title_fontsize=9)
-    ax.set_title(titre, fontsize=11, fontweight="bold", pad=18)
-    fig.text(0.5, 0.01, SOURCE_LABEL, ha="center", fontsize=8, style="italic")
+    ax.set_title(titre, fontsize=10.5, fontweight="bold", pad=16)
+    fig.text(0.5, 0.01, SOURCE_LABEL, ha="center", fontsize=7.5, style="italic")
     plt.tight_layout()
     return fig
 
@@ -181,11 +170,15 @@ def graphique_rose_vents(df_agg, titre="Rose des vents", n_secteurs=16,
 
 def graphique_thermopluviogramme(df_mensuel, titre="Thermopluviogramme — bilan mensuel",
                                   df_normales=None,
-                                  label_normale=DEFAULT_LABEL_NORMALE):
+                                  label_normale=DEFAULT_LABEL_NORMALE,
+                                  etp_normale=None, label_etp="ETP"):
     """
     Diagramme ombrothermique mensuel : moyenne des mois observés sur la
     période sélectionnée (barres pleines + courbes), comparée à la normale
-    de référence (barres et courbe grisées en retrait) si disponible.
+    de référence si disponible.
+
+    etp_normale : liste/array de valeurs (mm/mois) alignée sur les mêmes
+    mois que df_mensuel. Optionnel — tracée sur l'axe précipitations.
     """
     if df_mensuel.empty:
         return None
@@ -217,9 +210,16 @@ def graphique_thermopluviogramme(df_mensuel, titre="Thermopluviogramme — bilan
         else np.zeros(len(df_mensuel))
     ax2.bar(x + 0.16, p, color=C_PRECIP, alpha=0.65, width=0.30,
             label="Précip. observées (mm)", zorder=3)
-    ax2.set_ylabel("Précipitations (mm/mois)", color=C_PRECIP, fontsize=10)
+    ax2.set_ylabel("Précipitations / ETP (mm/mois)", color=C_PRECIP, fontsize=10)
     ax2.tick_params(axis="y", labelcolor=C_PRECIP)
     ax2.set_ylim(0, max(p.max() if len(p) else 1, 1) * 2.6)
+
+    if etp_normale is not None:
+        etp_nrm = np.asarray(etp_normale, dtype=float)
+        if len(etp_nrm) == len(df_mensuel) and np.isfinite(etp_nrm).any():
+            ax2.plot(x, etp_nrm, color=C_ETP, linewidth=1.6, linestyle=":",
+                     marker="^", markersize=4,
+                     label=f"{label_etp}", zorder=5, alpha=0.9)
 
     ax1.plot(x, df_mensuel["t_max"], color=C_MAX, linewidth=2,
              marker="o", markersize=5, label="T° max observée", zorder=4)
@@ -238,7 +238,7 @@ def graphique_thermopluviogramme(df_mensuel, titre="Thermopluviogramme — bilan
     lines1, lbl1 = ax1.get_legend_handles_labels()
     lines2, lbl2 = ax2.get_legend_handles_labels()
     ax1.legend(lines1 + lines2, lbl1 + lbl2,
-               loc="upper left", fontsize=9, framealpha=0.92, ncol=2)
+               loc="upper left", fontsize=8.5, framealpha=0.92, ncol=2)
     ax1.set_title(titre, fontsize=12, fontweight="bold")
     _source(fig)
     plt.tight_layout()
@@ -246,7 +246,72 @@ def graphique_thermopluviogramme(df_mensuel, titre="Thermopluviogramme — bilan
 
 
 # ==============================================================================
-# 4. SUIVI JOURNALIER — précipitations et températures (fenêtres courtes)
+# 4. EVAPOTRANSPIRATION — graphe dédié (ETP mensuelle + bilan hydrique P-ETP)
+# ==============================================================================
+
+def graphique_etp(df_etp_normale, df_normales=None,
+                   titre="Évapotranspiration et bilan hydrique",
+                   label_normale=DEFAULT_LABEL_NORMALE,
+                   label_etp="ETP officielle Penman-Monteith (Météo-France)"):
+    """
+    Graphique dédié à l'évapotranspiration : barres ETP mensuelle et
+    précipitations de référence côte à côte (même échelle mm), plus une
+    courbe du bilan hydrique simplifié (P - ETP) — utile pour identifier
+    les mois en déficit hydrique (agriculture, gestion de la ressource).
+
+    Args:
+        df_etp_normale : DataFrame avec colonnes mois, etp_normale_mm
+        df_normales     : DataFrame avec mois, precip_norm (pour le bilan)
+        label_etp       : légende précisant la source de l'ETP
+
+    Returns:
+        Figure matplotlib, ou None si données insuffisantes.
+    """
+    if df_etp_normale is None or df_etp_normale.empty:
+        return None
+
+    df = df_etp_normale.copy().sort_values("mois")
+    if df_normales is not None and not df_normales.empty and "precip_norm" in df_normales.columns:
+        df = df.merge(df_normales[["mois", "precip_norm"]], on="mois", how="left")
+
+    x = np.arange(len(df))
+    fig, ax1 = plt.subplots(figsize=(13, 5.5))
+
+    etp_vals = df["etp_normale_mm"].values
+    ax1.bar(x - 0.18, etp_vals, width=0.34, color=C_ETP, alpha=0.85,
+            label=label_etp, zorder=3)
+
+    if "precip_norm" in df.columns and df["precip_norm"].notna().any():
+        precip_vals = df["precip_norm"].fillna(0).values
+        ax1.bar(x + 0.18, precip_vals, width=0.34, color=C_PRECIP, alpha=0.75,
+                label=f"Précipitations {label_normale}", zorder=3)
+
+        bilan = precip_vals - etp_vals
+        ax2 = ax1.twinx()
+        ax2.plot(x, bilan, color=C_BILAN, linewidth=2, marker="o",
+                 markersize=5, label="Bilan hydrique (P − ETP)", zorder=5)
+        ax2.axhline(0, color=C_BILAN, linewidth=0.8, linestyle="--", alpha=0.5)
+        ax2.set_ylabel("Bilan hydrique P − ETP (mm)", color=C_BILAN, fontsize=10)
+        ax2.tick_params(axis="y", labelcolor=C_BILAN)
+
+        lines1, lbl1 = ax1.get_legend_handles_labels()
+        lines2, lbl2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, lbl1 + lbl2, loc="upper left", fontsize=9)
+    else:
+        ax1.legend(loc="upper left", fontsize=9)
+
+    ax1.set_ylabel("mm / mois", fontsize=10)
+    ax1.set_xticks(x)
+    ax1.set_xticklabels([MOIS_LABELS[int(m) - 1] for m in df["mois"]], fontsize=10)
+    ax1.grid(axis="y", linestyle="--", alpha=0.3)
+    ax1.set_title(titre, fontsize=12, fontweight="bold")
+    _source(fig)
+    plt.tight_layout()
+    return fig
+
+
+# ==============================================================================
+# 5. SUIVI JOURNALIER — précipitations et températures (fenêtres courtes)
 # ==============================================================================
 
 def graphique_histogramme_periode(df, titre="Précipitations et températures — suivi journalier",
@@ -322,7 +387,7 @@ def graphique_histogramme_periode(df, titre="Précipitations et températures �
 
 
 # ==============================================================================
-# 5. EVOLUTION TEMPERATURES ANNUELLES
+# 6. EVOLUTION TEMPERATURES ANNUELLES
 # ==============================================================================
 
 def graphique_temperatures_annuelles(df_annuel, titre="Évolution des températures annuelles",

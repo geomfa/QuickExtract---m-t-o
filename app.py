@@ -1,6 +1,10 @@
 """
 QuickExtract Météo — Données horaires récentes
 Source : Météo-France / data.gouv.fr (open data, aucun compte requis).
+
+Pour les périodes de plus de 30 jours, les données proviennent du réseau
+SYNOP (Opendatasoft) plutôt que du fichier horaire départemental Météo-France
+("latest", limité à ~1-2 ans glissants) — voir synop_client.py.
 """
 
 import io
@@ -26,15 +30,19 @@ from mf_client import (
     normaliser_variables,
     agreger_multi_stations,
     calculer_normales,
-    calculer_normales_vent,
     calculer_etp_officielle_mensuelle,
     colonne_presente,
     debug_colonnes,
+)
+from synop_client import (
+    stations_synop_proches,
+    telecharger_synop_periode,
 )
 from graphiques import (
     graphique_temp_precip,
     graphique_rose_vents,
     graphique_thermopluviogramme,
+    graphique_etp,
     graphique_histogramme_periode,
     graphique_temperatures_annuelles,
 )
@@ -46,6 +54,9 @@ from graphiques import (
 st.set_page_config(page_title="QuickExtract Météo", layout="wide")
 SOURCE_LABEL = "Source : Météo-France — Données climatologiques de base (data.gouv.fr)"
 
+SEUIL_SYNOP_JOURS = 31  # au-delà, on bascule sur les données SYNOP (historique long)
+N_STATIONS_SYNOP  = 3   # réseau SYNOP plus clairsemé que le réseau climatologique
+
 # ==============================================================================
 # SESSION STATE
 # ==============================================================================
@@ -53,7 +64,7 @@ SOURCE_LABEL = "Source : Météo-France — Données climatologiques de base (da
 _DEFAULTS = {
     "carte_lat":       None,
     "carte_lon":       None,
-    "code_dept_actif": None,   # département chargé (détecte un changement de zone)
+    "code_dept_actif": None,
     "df_brut":         None,
     "df_quot":         None,
     "df_inspect":      None,
@@ -178,7 +189,6 @@ if st.sidebar.button(
     use_container_width=True,
     disabled=not zone_definie,
 ):
-    # Réinitialisation de l'état
     st.session_state["code_dept_actif"] = code_dept
     st.session_state["df_brut"]         = None
     st.session_state["df_quot"]         = None
@@ -187,8 +197,6 @@ if st.sidebar.button(
     st.session_state["periode_active"]  = None
     st.session_state["etape"]           = 1
 
-    # Téléchargement immédiat pour que la sidebar étape 2 soit disponible
-    # au prochain run (sinon df_inspect reste None et les widgets n'apparaissent pas)
     with st.spinner(f"Téléchargement des données — département {code_dept}..."):
         try:
             _df_brut = telecharger_horaire_departement(code_dept)
@@ -218,6 +226,10 @@ if st.session_state["etape"] >= 1 and st.session_state["df_inspect"] is not None
 
     st.sidebar.divider()
     st.sidebar.subheader("Stations")
+    st.sidebar.caption(
+        "Utilisées pour les analyses courtes (≤ 31 jours). "
+        "Au-delà, les stations SYNOP les plus proches sont utilisées automatiquement."
+    )
 
     df_inspect    = st.session_state["df_inspect"]
     col_nom_sta   = "NOM_USUEL" if "NOM_USUEL" in df_inspect.columns else "NUM_POSTE"
@@ -238,7 +250,8 @@ if st.session_state["etape"] >= 1 and st.session_state["df_inspect"] is not None
     st.sidebar.subheader("Fenêtre temporelle")
     fenetre = st.sidebar.radio(
         "Période",
-        ["24 dernières heures", "7 derniers jours", "15 derniers jours", "Personnalisée"],
+        ["24 dernières heures", "7 derniers jours", "15 derniers jours",
+         "1 an", "Personnalisée"],
         key="radio_fenetre",
     )
 
@@ -249,6 +262,8 @@ if st.session_state["etape"] >= 1 and st.session_state["df_inspect"] is not None
         date_debut, date_fin = now - timedelta(days=7), now
     elif fenetre == "15 derniers jours":
         date_debut, date_fin = now - timedelta(days=15), now
+    elif fenetre == "1 an":
+        date_debut, date_fin = now - timedelta(days=365), now
     else:
         c1, c2 = st.sidebar.columns(2)
         d1 = c1.date_input("Du", value=(now - timedelta(days=30)).date(), key="d1")
@@ -258,10 +273,15 @@ if st.session_state["etape"] >= 1 and st.session_state["df_inspect"] is not None
         date_debut = datetime.combine(d1, time(h1, 0))
         date_fin   = datetime.combine(d2, time(h2, 59))
 
+    _duree_apercu = (date_fin - date_debut).days
     st.sidebar.caption(
         f"Du {date_debut.strftime('%d/%m/%Y %Hh')} "
         f"au {date_fin.strftime('%d/%m/%Y %Hh')} (UTC)"
     )
+    if _duree_apercu > SEUIL_SYNOP_JOURS:
+        st.sidebar.caption(
+            f"Période > {SEUIL_SYNOP_JOURS} j — données SYNOP utilisées automatiquement."
+        )
 
     if st.sidebar.button(
         "2 — Lancer l'analyse",
@@ -289,7 +309,6 @@ with st.sidebar.expander("Mode debug"):
 st.title("QuickExtract Météo — Données horaires récentes")
 st.caption(SOURCE_LABEL)
 
-# Carte Folium (toujours affichée)
 centre = ([lat_centre, lon_centre] if lat_centre else [46.5, 2.5])
 zoom   = 10 if lat_centre else 5
 m = folium.Map(location=centre, zoom_start=zoom, tiles="OpenStreetMap")
@@ -303,11 +322,10 @@ if lat_centre and lon_centre:
 carte_result = st_folium(
     m, height=260,
     use_container_width=True,
-    returned_objects=["last_clicked"],  # toujours actif, ignoré si mode != "Carte"
+    returned_objects=["last_clicked"],
     key="carte_principale",
 )
 
-# Récupération du clic carte
 if mode_saisie == "Carte" and carte_result and carte_result.get("last_clicked"):
     clic = carte_result["last_clicked"]
     new_lat = round(clic["lat"], 6)
@@ -317,7 +335,6 @@ if mode_saisie == "Carte" and carte_result and carte_result.get("last_clicked"):
         st.session_state["carte_lon"] = new_lon
         st.rerun()
 
-# Arrêt si aucune action n'a encore été faite
 if st.session_state["etape"] == 0:
     st.info("Renseignez la zone d'étude dans la barre latérale puis cliquez sur "
             "'1 — Chercher les stations'.")
@@ -327,7 +344,6 @@ if st.session_state["etape"] == 0:
 # TELECHARGEMENT (déclenché uniquement après clic sur bouton 1)
 # ==============================================================================
 
-# Données déjà téléchargées dans le callback du bouton 1
 if st.session_state["df_brut"] is None:
     st.error("Données non disponibles. Cliquez sur '1 — Chercher les stations'.")
     st.stop()
@@ -380,7 +396,6 @@ for col in ["Nébulosité", "Historique"]:
 
 st.dataframe(df_display, use_container_width=True, hide_index=True)
 
-# Arrêt si l'analyse n'a pas encore été lancée
 if st.session_state["etape"] < 2 or st.session_state["periode_active"] is None:
     st.info("Sélectionnez les stations et la période dans la barre latérale, "
             "puis cliquez sur '2 — Lancer l'analyse'.")
@@ -396,42 +411,77 @@ date_debut = periode["date_debut"]
 date_fin   = periode["date_fin"]
 selection  = st.session_state["selection"] or []
 
+duree_jours     = (date_fin - date_debut).days
+duree_ans       = duree_jours / 365.25
+is_long_period  = duree_jours > SEUIL_SYNOP_JOURS
+
 col_nom_sta = "NOM_USUEL" if "NOM_USUEL" in df_inspect.columns else "NUM_POSTE"
 df_stations = df_inspect[df_inspect[col_nom_sta].isin(selection)].copy()
-ids_selec   = df_stations["NUM_POSTE"].tolist()
+ids_selec   = df_stations["NUM_POSTE"].tolist()   # utilisé pour les normales et l'ETP
 
 if not ids_selec:
     st.warning("Aucune station sélectionnée.")
     st.stop()
 
-df_filtre = df_brut[df_brut["NUM_POSTE"].astype(str).isin([str(i) for i in ids_selec])]
+source_donnees_label = "Météo-France — fichier horaire départemental"
 
-try:
-    df_obs = filtrer_periode(df_filtre, date_debut, date_fin)
-except DonneesClimatoError as e:
-    st.error(str(e))
-    st.stop()
+if not is_long_period:
+    # --- Période courte : réseau climatologique départemental ---
+    df_filtre = df_brut[df_brut["NUM_POSTE"].astype(str).isin([str(i) for i in ids_selec])]
+    try:
+        df_obs = filtrer_periode(df_filtre, date_debut, date_fin)
+    except DonneesClimatoError as e:
+        st.error(str(e))
+        st.stop()
 
-if df_obs.empty:
-    st.warning(
-        "Aucune observation sur cette période. "
-        "Le fichier 'latest' couvre depuis janvier de l'année précédente jusqu'à J-1/J-2. "
-        "Essayez une fenêtre plus large."
+    if df_obs.empty:
+        st.warning(
+            "Aucune observation sur cette période. "
+            "Le fichier 'latest' couvre depuis janvier de l'année précédente jusqu'à J-1/J-2. "
+            "Essayez une fenêtre plus large."
+        )
+        st.stop()
+
+    df_obs = normaliser_variables(df_obs)
+    df_obs = df_obs.merge(df_stations[["NUM_POSTE", "distance_km"]], on="NUM_POSTE", how="left")
+    df_agg = agreger_multi_stations(df_obs, df_stations)
+
+else:
+    # --- Période longue (> 31 j) : réseau SYNOP (historique multi-année) ---
+    with st.spinner("Recherche des stations SYNOP les plus proches..."):
+        df_stations_synop = stations_synop_proches(lat_centre, lon_centre, n=N_STATIONS_SYNOP)
+
+    if df_stations_synop.empty:
+        st.error("Aucune station SYNOP trouvée à proximité pour cette période longue.")
+        st.stop()
+
+    with st.spinner(f"Téléchargement des données SYNOP ({duree_jours} jours, "
+                     f"{len(df_stations_synop)} station(s))..."):
+        df_obs = telecharger_synop_periode(
+            tuple(df_stations_synop["NUM_POSTE"].tolist()), date_debut, date_fin
+        )
+
+    if df_obs.empty:
+        st.warning(
+            "Aucune donnée SYNOP disponible pour cette période. "
+            "Essayez une période plus récente ou plus courte."
+        )
+        st.stop()
+
+    df_obs = df_obs.merge(
+        df_stations_synop[["NUM_POSTE", "distance_km"]], on="NUM_POSTE", how="left"
     )
-    st.stop()
-
-df_obs = normaliser_variables(df_obs)
-df_obs = df_obs.merge(df_stations[["NUM_POSTE", "distance_km"]], on="NUM_POSTE", how="left")
-df_agg = agreger_multi_stations(df_obs, df_stations)
+    df_agg = agreger_multi_stations(df_obs, df_stations_synop)
+    source_donnees_label = "Météo-France — SYNOP (Opendatasoft)"
 
 if df_agg.empty:
     st.error("Erreur lors de l'agrégation des données.")
     st.stop()
 
-df_normales      = calculer_normales(df_quot, ids_selec, n_annees=10)
-df_normales_vent = calculer_normales_vent(df_quot, ids_selec, n_annees=10)
+df_stations_affichees = df_stations if not is_long_period else df_stations_synop
 
-# Libellés dynamiques des normales (années réellement couvertes)
+df_normales = calculer_normales(df_quot, ids_selec, n_annees=10)
+
 if df_normales is not None:
     _an_min = df_normales.attrs.get("annee_min", "")
     _an_max = df_normales.attrs.get("annee_max", "")
@@ -439,19 +489,9 @@ if df_normales is not None:
 else:
     label_normale = "Normale (réf.)"
 
-if df_normales_vent is not None:
-    _anv_min = df_normales_vent.attrs.get("annee_min", "")
-    _anv_max = df_normales_vent.attrs.get("annee_max", "")
-    label_normale_vent = (
-        f"Normale dir. {_anv_min}-{_anv_max} (vent fort)" if _anv_min
-        else "Normale directionnelle (réf.)"
-    )
-else:
-    label_normale_vent = "Normale directionnelle (réf.)"
-
 # Évapotranspiration officielle Penman-Monteith (fichier décadaire agro
-# Météo-France). Aucun calcul de repli — si indisponible, l'app l'indique
-# clairement plutôt que d'afficher une estimation.
+# Météo-France). Basée sur les stations du réseau climatologique (ids_selec),
+# indépendamment de la source utilisée pour les autres variables.
 _df_decadagro   = telecharger_decadaire_etp(st.session_state["code_dept_actif"])
 _etp_officielle = calculer_etp_officielle_mensuelle(_df_decadagro, ids_selec, n_annees=10)
 
@@ -460,17 +500,13 @@ df_etp_normale = (
     if _etp_officielle is not None else None
 )
 
-# Titres et variables de période
 titre_base  = nom_commune or f"dept. {st.session_state['code_dept_actif']}"
 prefixe_nom = titre_base.replace(" ", "_")
 periode_nom = f"{date_debut.strftime('%Y%m%d%H')}_{date_fin.strftime('%Y%m%d%H')}"
-duree_jours = (date_fin - date_debut).days
-duree_ans   = duree_jours / 365.25
 
-# Résumé
 st.subheader(f"Résultats — {titre_base}")
 cap = (
-    f"Stations : {', '.join(selection)} | "
+    f"Source : {source_donnees_label} | "
     f"{date_debut.strftime('%d/%m/%Y %Hh')} → {date_fin.strftime('%d/%m/%Y %Hh')} UTC | "
     f"{len(df_agg)} pas horaires"
 )
@@ -535,7 +571,7 @@ agg_annuel = (
     if not agg_journalier.empty else pd.DataFrame()
 )
 
-df_thermopluvio_export = None  # renseigné si le bilan mensuel est généré
+df_thermopluvio_export = None
 
 # ==============================================================================
 # GRAPHIQUES
@@ -556,36 +592,50 @@ if (
     _afficher(fig, f"temp_precip_{prefixe_nom}_{periode_nom}.png",
               "Télécharger — T° / Précipitations")
 
-# 2. Rose des vents (toujours, avec normales directionnelles si disponibles)
+# 2. Rose des vents — période sélectionnée + dernier mois (comparaison)
 if colonne_presente(df_agg, "ff_ms") and colonne_presente(df_agg, "dd_deg"):
     st.subheader("Rose des vents")
-    fig = graphique_rose_vents(
-        df_agg,
-        titre=(
-            f"Rose des vents — {titre_base}\n"
-            f"({df_agg['date_dt'].min().strftime('%d/%m/%Y')} "
-            f"— {df_agg['date_dt'].max().strftime('%d/%m/%Y')})"
-        ),
-        df_normales_vent=df_normales_vent,
-        label_normale=label_normale_vent,
-    )
-    if fig:
-        _afficher(fig, f"rose_vents_{prefixe_nom}_{periode_nom}.png",
-                  "Télécharger — Rose des vents")
-        if df_normales_vent is None:
-            st.caption(
-                "Normale directionnelle non disponible pour ces stations "
-                "(direction du vent absente ou insuffisante dans l'historique)."
-            )
+
+    date_max_dispo   = df_agg["date_dt"].max()
+    date_debut_dm     = date_max_dispo - pd.Timedelta(days=30)
+    df_dernier_mois   = df_agg[df_agg["date_dt"] >= date_debut_dm]
+
+    col_a, col_b = st.columns(2)
+
+    with col_a:
+        fig_periode = graphique_rose_vents(
+            df_agg,
+            titre=(
+                f"Période sélectionnée\n"
+                f"({df_agg['date_dt'].min().strftime('%d/%m/%Y')} "
+                f"— {df_agg['date_dt'].max().strftime('%d/%m/%Y')})"
+            ),
+        )
+        if fig_periode:
+            _afficher(fig_periode, f"rose_vents_periode_{prefixe_nom}_{periode_nom}.png",
+                      "Télécharger — Rose des vents (période)")
+        else:
+            st.caption("Données vent insuffisantes sur la période.")
+
+    with col_b:
+        fig_dernier_mois = graphique_rose_vents(
+            df_dernier_mois,
+            titre=(
+                f"Dernier mois (comparaison)\n"
+                f"({date_debut_dm.strftime('%d/%m/%Y')} "
+                f"— {date_max_dispo.strftime('%d/%m/%Y')})"
+            ),
+        )
+        if fig_dernier_mois:
+            _afficher(fig_dernier_mois, f"rose_vents_dernier_mois_{prefixe_nom}_{periode_nom}.png",
+                      "Télécharger — Rose des vents (dernier mois)")
+        else:
+            st.caption("Données vent insuffisantes sur le dernier mois.")
 
 # 3. Suivi journalier — fenêtres courtes uniquement (7j, 15j, perso <= 31j)
-# Distinct du thermopluviogramme (climatologie mensuelle) pour éviter la
-# redondance sur les longues périodes.
-SEUIL_MENSUEL_JOURS = 31
-
 if (
     fenetre in ("7 derniers jours", "15 derniers jours")
-    or (fenetre == "Personnalisée" and duree_jours <= SEUIL_MENSUEL_JOURS)
+    or (fenetre == "Personnalisée" and duree_jours <= SEUIL_SYNOP_JOURS)
 ) and not agg_journalier.empty and colonne_presente(df_agg, "t_celsius"):
 
     st.subheader("Précipitations et températures — suivi journalier")
@@ -607,10 +657,9 @@ if (
         _afficher(fig, f"suivi_journalier_{prefixe_nom}_{periode_nom}.png",
                   "Télécharger — Suivi journalier")
 
-# 4. Thermopluviogramme — climatologie mensuelle (perso > 31j uniquement)
-# Seul graphique mensuel affiché : pas de doublon avec le suivi journalier.
+# 4. Thermopluviogramme — climatologie mensuelle (périodes longues : SYNOP)
 if (
-    fenetre == "Personnalisée" and duree_jours > SEUIL_MENSUEL_JOURS
+    is_long_period
     and not agg_mensuel.empty
     and colonne_presente(df_agg, "t_celsius")
 ):
@@ -624,9 +673,6 @@ if (
         p_norm       = agg_mensuel.groupby("mois")["precip_tot"].mean().reset_index(name="precip_tot")
         mensuel_norm = mensuel_norm.merge(p_norm, on="mois")
 
-    # Évapotranspiration officielle (référence n dernières années), alignée
-    # sur les mêmes mois que mensuel_norm. Pas d'ETP "observée" spécifique à
-    # la période sélectionnée — seule la référence officielle est affichée.
     etp_norm_series = None
     if df_etp_normale is not None:
         _etp_norm_map = dict(zip(df_etp_normale["mois"], df_etp_normale["etp_normale_mm"]))
@@ -640,8 +686,6 @@ if (
         etp_normale=etp_norm_series,
         label_etp="ETP officielle Penman-Monteith (Météo-France)",
     )
-    if df_etp_normale is None:
-        st.caption("ETP non disponible pour ces stations.")
     if fig:
         _afficher(fig, f"thermopluvio_{prefixe_nom}_{periode_nom}.png",
                   "Télécharger — Thermopluviogramme")
@@ -650,9 +694,26 @@ if (
     if etp_norm_series is not None:
         df_thermopluvio_export["etp_normale_mm"] = etp_norm_series
 
-# 5. Évolution T° annuelles — personnalisée >= 1 an
+# 5. Évapotranspiration — graphe dédié (indépendant de la durée de la période,
+#    montré dès que l'ETP officielle est disponible)
+if df_etp_normale is not None:
+    st.subheader("Évapotranspiration et bilan hydrique")
+    fig = graphique_etp(
+        df_etp_normale,
+        df_normales=df_normales,
+        titre=f"Évapotranspiration et bilan hydrique — {titre_base}",
+        label_normale=label_normale,
+    )
+    if fig:
+        _afficher(fig, f"etp_{prefixe_nom}_{periode_nom}.png",
+                  "Télécharger — ETP / bilan hydrique")
+elif is_long_period:
+    st.subheader("Évapotranspiration")
+    st.caption("ETP officielle non disponible pour ces stations.")
+
+# 6. Évolution T° annuelles — période longue >= 1 an
 if (
-    fenetre == "Personnalisée" and duree_ans >= 1.0
+    duree_ans >= 1.0
     and not agg_annuel.empty
     and "t_min" in agg_annuel.columns
 ):
@@ -687,7 +748,7 @@ with st.expander("Paramètres de la carte", expanded=False):
                 gdf_zone   = charger_zone_geojson(fichier_zone) if fichier_zone else None
                 logo_bytes = fichier_logo.read() if fichier_logo else None
                 html_carte = generer_carte_folium(
-                    df_stations=df_stations,
+                    df_stations=df_stations_affichees,
                     titre=titre_carte,
                     gdf_zone=gdf_zone,
                     logo_bytes=logo_bytes,
@@ -716,9 +777,9 @@ df_export_obs = df_obs.drop(columns=["_fichier_source"], errors="ignore")
 
 buffer = io.BytesIO()
 with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-    df_stations.to_excel(writer,    sheet_name="Stations",       index=False)
-    df_export_agg.to_excel(writer,  sheet_name="Horaire_agrege", index=False)
-    df_export_obs.to_excel(writer,  sheet_name="Horaire_brut",   index=False)
+    df_stations_affichees.to_excel(writer, sheet_name="Stations",       index=False)
+    df_export_agg.to_excel(writer,          sheet_name="Horaire_agrege", index=False)
+    df_export_obs.to_excel(writer,          sheet_name="Horaire_brut",   index=False)
     if not agg_journalier.empty:
         agg_journalier.to_excel(writer, sheet_name="Journalier", index=False)
     if not agg_mensuel.empty:
