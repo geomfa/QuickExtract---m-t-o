@@ -394,7 +394,7 @@ df_display.rename(columns={
     "etp_dispo":        "ETP officielle",
 }, inplace=True)
 
-for col in ["Nébulosité", "Historique"]:
+for col in ["Nébulosité", "Historique", "ETP officielle"]:
     if col in df_display.columns:
         df_display[col] = df_display[col].map({True: "oui", False: "non"})
 
