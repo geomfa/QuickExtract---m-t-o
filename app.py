@@ -67,6 +67,7 @@ _DEFAULTS = {
     "code_dept_actif": None,
     "df_brut":         None,
     "df_quot":         None,
+    "df_decadagro":    None,
     "df_inspect":      None,
     "selection":       None,
     "periode_active":  None,
@@ -206,14 +207,16 @@ if st.sidebar.button(
             st.stop()
     with st.spinner("Chargement des données historiques..."):
         st.session_state["df_quot"] = telecharger_quotidien_previous(code_dept)
-    _df_quot = st.session_state["df_quot"]
+        st.session_state["df_decadagro"] = telecharger_decadaire_etp(code_dept)
+    _df_quot      = st.session_state["df_quot"]
+    _df_decadagro = st.session_state["df_decadagro"]
     with st.spinner("Inspection des stations..."):
         _df_inspect = inspecter_stations(
-            st.session_state["df_brut"], _df_quot,
+            st.session_state["df_brut"], _df_quot, _df_decadagro,
             lat_centre, lon_centre, n=10,
         )
         st.session_state["df_inspect"] = _df_inspect
-    st.rerun()
+        st.rerun()
 
 if not zone_definie:
     st.sidebar.caption("Renseignez la zone d'étude pour activer la recherche.")
@@ -375,7 +378,7 @@ if df_inspect is None:
 
 cols_affich = [c for c in [
     "NUM_POSTE", "NOM_USUEL", "distance_km", "ALTI",
-    "derniere_date", "fraicheur_jours", "nebulo_dispo", "historique_dispo",
+    "derniere_date", "fraicheur_jours", "nebulo_dispo", "historique_dispo", "etp_dispo",
 ] if c in df_inspect.columns]
 
 df_display = df_inspect[cols_affich].copy()
@@ -388,6 +391,7 @@ df_display.rename(columns={
     "fraicheur_jours":  "Fraîcheur (j)",
     "nebulo_dispo":     "Nébulosité",
     "historique_dispo": "Historique",
+    "etp_dispo":        "ETP officielle",
 }, inplace=True)
 
 for col in ["Nébulosité", "Historique"]:
