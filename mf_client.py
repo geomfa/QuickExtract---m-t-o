@@ -232,7 +232,7 @@ def telecharger_quotidien_previous(code_dept, n_annees=10):
 # INSPECTION DES STATIONS (étape intermédiaire)
 # ==============================================================================
 
-def inspecter_stations(df_brut, df_quot, lat, lon, n=10):
+def inspecter_stations(df_brut, df_quot, df_decadagro, lat, lon, n=10):
     """
     Retourne un DataFrame décrivant les n stations les plus proches avec :
       - NUM_POSTE, NOM_USUEL, LAT, LON, ALTI, distance_km
@@ -240,6 +240,7 @@ def inspecter_stations(df_brut, df_quot, lat, lon, n=10):
       - fraicheur_jours   : nb de jours depuis la dernière mesure
       - nebulo_dispo      : True si colonne N présente et non vide
       - historique_dispo  : True si la station est présente dans le fichier quotidien
+      - etp_dispo         : True si des valeurs ETP officielles exploitables existent
     """
     cols_base = [c for c in ["NUM_POSTE", "NOM_USUEL", "LAT", "LON", "ALTI"]
                  if c in df_brut.columns]
@@ -304,6 +305,22 @@ def inspecter_stations(df_brut, df_quot, lat, lon, n=10):
         df_sta["historique_dispo"] = df_sta["NUM_POSTE"].astype(str).isin(ids_hist)
     else:
         df_sta["historique_dispo"] = False
+
+    # ETP officielle disponible : station présente dans le fichier décadaire
+    # agro ET disposant de valeurs ETP réellement exploitables (la colonne
+    # peut exister dans le fichier mais être vide pour certaines stations).
+    if df_decadagro is not None and not df_decadagro.empty and "NUM_POSTE" in df_decadagro.columns:
+        df_dec_norm = normaliser_variables(df_decadagro)
+        if "etp_officielle_mm" in df_dec_norm.columns:
+            ids_etp = set(
+                df_dec_norm.loc[df_dec_norm["etp_officielle_mm"].notna(), "NUM_POSTE"]
+                .astype(str).unique()
+            )
+        else:
+            ids_etp = set()
+        df_sta["etp_dispo"] = df_sta["NUM_POSTE"].astype(str).isin(ids_etp)
+    else:
+        df_sta["etp_dispo"] = False
 
     return df_sta
 
