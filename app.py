@@ -303,7 +303,8 @@ if st.session_state["etape"] >= 1 and st.session_state["df_inspect"] is not None
         st.sidebar.caption("Sélectionnez au moins une station.")
 
 with st.sidebar.expander("Mode debug"):
-    debug_on = st.checkbox("Afficher la structure brute du fichier")
+    debug_on = st.checkbox("Afficher la structure du fichier horaire")
+    debug_etp = st.checkbox("Afficher la structure du fichier ETP (décadaire)")
 
 # ==============================================================================
 # CORPS — TITRE ET CARTE
@@ -496,7 +497,14 @@ else:
 # Évapotranspiration officielle Penman-Monteith (fichier décadaire agro
 # Météo-France). Basée sur les stations du réseau climatologique (ids_selec),
 # indépendamment de la source utilisée pour les autres variables.
-_df_decadagro   = telecharger_decadaire_etp(st.session_state["code_dept_actif"])
+_df_decadagro = telecharger_decadaire_etp(st.session_state["code_dept_actif"])
+if debug_etp:
+    st.subheader("Debug — fichier ETP décadaire")
+    if _df_decadagro is None:
+        st.warning("Aucun fichier décadaire téléchargé (échec ou indisponible).")
+    else:
+        st.write(f"Colonnes ({len(_df_decadagro.columns)}) :", list(_df_decadagro.columns))
+        st.dataframe(_df_decadagro.head(10), use_container_width=True)
 _etp_officielle = calculer_etp_officielle_mensuelle(_df_decadagro, ids_selec, n_annees=10)
 
 df_etp_normale = (
