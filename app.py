@@ -24,7 +24,7 @@ from mf_client import (
     commune_depuis_insee,
     telecharger_horaire_departement,
     telecharger_quotidien_previous,
-    telecharger_decadaire_etp,
+    telecharger_quotidien_etp,
     inspecter_stations,
     filtrer_periode,
     normaliser_variables,
@@ -207,7 +207,7 @@ if st.sidebar.button(
             st.stop()
     with st.spinner("Chargement des données historiques..."):
         st.session_state["df_quot"] = telecharger_quotidien_previous(code_dept)
-        st.session_state["df_decadagro"] = telecharger_decadaire_etp(code_dept)
+        st.session_state["df_decadagro"] = telecharger_quotidien_etp(code_dept)
     _df_quot      = st.session_state["df_quot"]
     _df_decadagro = st.session_state["df_decadagro"]
     with st.spinner("Inspection des stations..."):
@@ -497,7 +497,7 @@ else:
 # Évapotranspiration officielle Penman-Monteith (fichier décadaire agro
 # Météo-France). Basée sur les stations du réseau climatologique (ids_selec),
 # indépendamment de la source utilisée pour les autres variables.
-_df_decadagro = telecharger_decadaire_etp(st.session_state["code_dept_actif"])
+_df_decadagro = telecharger_quotidien_etp(st.session_state["code_dept_actif"])
 if debug_etp:
     st.subheader("Debug — fichier ETP décadaire")
     if _df_decadagro is None:

@@ -514,46 +514,59 @@ def calculer_normales(df_quot, ids_stations, n_annees=10):
 
 
 # ==============================================================================
-# EVAPOTRANSPIRATION OFFICIELLE (Penman-Monteith, fichier décadaire agro)
+# EVAPOTRANSPIRATION OFFICIELLE (Penman-Monteith, fichier quotidien "autres-parametres")
 # ==============================================================================
 #
-# Source : "Données climatologiques de base - décadaires agro" (Météo-France),
-# variable ETP calculée selon la formule FAO-56 Penman-Monteith.
+# Source : fichier quotidien Météo-France Q_{dept}_{serie}_autres-parametres.csv.gz
+# — le fichier compagnon de Q_{dept}_{serie}_RR-T-Vent.csv.gz (déjà utilisé pour
+# les normales de température), contenant notamment la variable ETP.
 #
-# Aucun calcul de repli n'est effectué si cette source est indisponible —
-# l'app affiche alors "ETP non disponible" plutôt qu'une estimation.
+# Le fichier DECADAGRO initialement ciblé s'est révélé introuvable (404
+# systématique, quel que soit le millésime testé). Le fichier "autres-parametres"
+# est confirmé comme la bonne source par la documentation d'un outil tiers
+# d'exploitation de ces mêmes données (loicduffar/meteo.data-Tools) :
+# "Ce script traite uniquement le fichier RR-T-vent [...] à l'exclusion du
+# fichier autres-parametres contenant notamment l'ETP."
 #
-# ⚠️ Schéma non vérifié directement (fichier source inaccessible en test) :
-# plusieurs noms de colonnes candidats sont testés automatiquement. En cas
-# d'échec silencieux, activer le Mode debug dans l'app pour inspecter les
+# ⚠️ Nom exact de la colonne ETP non confirmé directement (aucun accès au
+# fichier réel possible en test). Plusieurs candidats sont testés automatiquement.
+# En cas d'échec silencieux, activer le Mode debug dans l'app pour inspecter les
 # colonnes réelles du fichier téléchargé et ajuster si besoin la liste
-# "etp_officielle_mm" dans COLONNES_METEO ainsi que _candidats_decadagro.
+# "etp_officielle_mm" dans COLONNES_METEO.
 
-def _candidats_decadagro(dept):
+def _candidats_quot_autres_params(dept):
     """
-    Candidats pour le fichier décadaire agro couvrant l'historique récent.
-    Même logique que _candidats_quot_previous : la borne haute de la période
-    "previous" change chaque année, on teste plusieurs valeurs.
+    Fichier quotidien 'autres-parametres' — même bucket, même département,
+    même logique de nommage que _candidats_quot_previous (RR-T-Vent) :
+    la borne haute de la période "previous" change chaque année, on teste
+    plusieurs valeurs récentes.
     """
     a = datetime.datetime.utcnow().year
-    return [
-        f"DECADAGRO_{dept}_previous-1950-{fin}.csv.gz"
+    candidats = [
+        f"Q_{dept}_previous-1950-{fin}_autres-parametres.csv.gz"
         for fin in range(a - 1, a - 8, -1)
     ]
+    # Repli sans suffixe, au cas où le fichier ne le porterait pas
+    candidats += [
+        f"Q_{dept}_previous-1950-{fin}.csv.gz"
+        for fin in range(a - 1, a - 4, -1)
+    ]
+    return candidats
 
 
 @st.cache_data(ttl=86400, show_spinner=False, max_entries=3)
-def telecharger_decadaire_etp(code_dept, n_annees=10):
+def telecharger_quotidien_etp(code_dept, n_annees=10):
     """
-    Télécharge le fichier décadaire agro (ETP officielle Penman-Monteith)
-    pour un département, filtré aux n dernières années disponibles.
+    Télécharge le fichier quotidien "autres-parametres" (contient l'ETP
+    officielle Penman-Monteith) pour un département, filtré aux n dernières
+    années disponibles.
 
     Retourne DataFrame ou None si le fichier est indisponible (auquel cas
     l'app affiche alors "ETP non disponible").
     """
     dept = _normaliser_dept(code_dept)
-    for nom in _candidats_decadagro(dept):
-        df = _telecharger_gz(f"{BASE_URL_DECADAGRO}/{nom}", colonnes_utiles=COLONNES_UTILES)
+    for nom in _candidats_quot_autres_params(dept):
+        df = _telecharger_gz(f"{BASE_URL_QUOT}/{nom}", colonnes_utiles=COLONNES_UTILES)
         if df is None:
             continue
 
@@ -569,20 +582,20 @@ def telecharger_decadaire_etp(code_dept, n_annees=10):
     return None
 
 
-def calculer_etp_officielle_mensuelle(df_decadagro, ids_stations, n_annees=10):
+def calculer_etp_officielle_mensuelle(df_quot_etp, ids_stations, n_annees=10):
     """
     Calcule la moyenne mensuelle de l'ETP officielle (Penman-Monteith) sur
-    les n dernières années, à partir du fichier décadaire agro.
+    les n dernières années, à partir du fichier quotidien "autres-parametres".
 
     Retourne DataFrame (mois, etp_officielle_mm) avec attrs annee_min/max,
     ou None si la colonne ETP n'a pas été reconnue dans le fichier
     (schéma inattendu) ou si les données sont insuffisantes.
     """
-    if df_decadagro is None or df_decadagro.empty:
+    if df_quot_etp is None or df_quot_etp.empty:
         return None
 
-    df = df_decadagro[
-        df_decadagro["NUM_POSTE"].astype(str).isin([str(i) for i in ids_stations])
+    df = df_quot_etp[
+        df_quot_etp["NUM_POSTE"].astype(str).isin([str(i) for i in ids_stations])
     ].copy()
     if df.empty:
         return None
@@ -607,7 +620,7 @@ def calculer_etp_officielle_mensuelle(df_decadagro, ids_stations, n_annees=10):
     if df.empty:
         return None
 
-    # Moyenne décadaire → mensuelle (moyenne des décades du mois) → normale
+    # Moyenne quotidienne → mensuelle (moyenne des jours du mois) → normale
     df_mens = df.groupby(["annee", "mois"])["etp_officielle_mm"].mean().reset_index()
     result  = df_mens.groupby("mois")["etp_officielle_mm"].mean().reset_index()
     result.attrs["annee_min"] = int(annee_min)
