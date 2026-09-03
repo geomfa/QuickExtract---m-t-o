@@ -9,9 +9,10 @@ Fichiers horaires  (BASE/HOR) :
 Fichiers quotidiens (BASE/QUOT) — pour les normales sur ~10 ans :
   Q_{DEPT}_latest-{a1}-{a2}_RR-T-Vent.csv.gz   — 2 dernières années
   Q_{DEPT}_previous-1950-{a}_RR-T-Vent.csv.gz  — 1950 à ~2021, couvre 10 ans
-  Q_{DEPT}_avant-1949_RR-T-Vent.csv.gz          — historique < 1950
+  Q_{DEPT}_previous-1950-{a}_autres-parametres.csv.gz — fichier compagnon,
+      contient l'ETP officielle Penman-Monteith (absente du fichier RR-T-Vent)
   Colonne date : AAAAMMJJ (%Y%m%d)
-  Variables : T (T°moy), TN (min), TX (max), RR (précip mm)
+  Variables : T (T°moy), TN (min), TX (max), RR (précip mm), ETP
 
 Format commun : séparateur ';', encodage latin-1.
 Colonnes communes : NUM_POSTE, NOM_USUEL, LAT, LON, ALTI.
@@ -25,10 +26,9 @@ import requests
 import pandas as pd
 import streamlit as st
 
-BASE_URL_HOR       = "https://meteofrance.s3.sbg.io.cloud.ovh.net/data/synchro_ftp/BASE/HOR"
-BASE_URL_QUOT      = "https://meteofrance.s3.sbg.io.cloud.ovh.net/data/synchro_ftp/BASE/QUOT"
-BASE_URL_DECADAGRO = "https://meteofrance.s3.sbg.io.cloud.ovh.net/data/synchro_ftp/BASE/DECADAGRO"
-GEO_API      = "https://geo.api.gouv.fr"
+BASE_URL_HOR  = "https://meteofrance.s3.sbg.io.cloud.ovh.net/data/synchro_ftp/BASE/HOR"
+BASE_URL_QUOT = "https://meteofrance.s3.sbg.io.cloud.ovh.net/data/synchro_ftp/BASE/QUOT"
+GEO_API       = "https://geo.api.gouv.fr"
 
 
 COLONNES_METEO = {
@@ -44,9 +44,8 @@ COLONNES_METEO = {
     "pmer_hpa":  ["PMER"],
     "n_octas":   ["N"],
     "vv_m":      ["VV"],
-    # ETP officielle Penman-Monteith FAO-56 (fichier décadaire agro) — nom de
-    # colonne non vérifié directement (fichier source inaccessible en test),
-    # plusieurs candidats testés par ordre de probabilité.
+    # ETP officielle Penman-Monteith (fichier quotidien "autres-parametres")
+    # — nom de colonne non vérifié directement, plusieurs candidats testés.
     "etp_officielle_mm": ["ETP", "ETPMON", "ETPP", "ETPPM"],
 }
 
@@ -59,6 +58,16 @@ COLONNES_UTILES = (
     COLONNES_BASE + COLONNES_DATE
     + [c for cands in COLONNES_METEO.values() for c in cands]
 )
+
+# Seuils indicatifs d'intensité horaire des précipitations (mm/h) —
+# classification météorologique courante, non issue d'une norme officielle
+# Météo-France vérifiée. À ajuster selon le contexte (seuils PLU, etc.).
+SEUILS_INTENSITE_PLUIE = {
+    "Faible (< 2.5 mm/h)":     (0, 2.5),
+    "Modérée (2.5-7.6 mm/h)":  (2.5, 7.6),
+    "Forte (7.6-15 mm/h)":     (7.6, 15),
+    "Très forte (> 15 mm/h)":  (15, float("inf")),
+}
 
 
 class DonneesClimatoError(Exception):
@@ -100,7 +109,6 @@ def _telecharger_gz(url, colonnes_utiles=None):
         raw = gzip.decompress(resp.content)
 
         if colonnes_utiles is not None:
-            # Lecture de l'en-tête seul pour déterminer les colonnes réellement présentes
             entete = pd.read_csv(
                 io.BytesIO(raw), sep=";", encoding="latin-1", nrows=0
             )
@@ -126,12 +134,6 @@ def _candidats_hor(dept):
         f"H_{dept}_latest-{a}-{a+1}.csv.gz",
         f"H_{dept}_latest-{a-2}-{a-1}.csv.gz",
     ]
-
-
-
-
-
-
 
 
 # ==============================================================================
@@ -190,26 +192,21 @@ def _candidats_quot_previous(dept):
     a = datetime.datetime.utcnow().year
     candidats = []
     for fin in range(a - 1, a - 8, -1):
-        candidats.append(
-            f"Q_{dept}_previous-1950-{fin}_RR-T-Vent.csv.gz"
-        )
-    # Variante sans suffixe _RR-T-Vent (anciens fichiers)
-    for fin in range(a - 1, a - 4, -1):
-        candidats.append(f"Q_{dept}_previous-1950-{fin}.csv.gz")
+        candidats.append(f"Q_{dept}_previous-1950-{fin}_RR-T-Vent.csv.gz")
+    candidats += [f"Q_{dept}_previous-1950-{fin}.csv.gz" for fin in range(a - 1, a - 4, -1)]
     return candidats
 
 
 @st.cache_data(ttl=86400, show_spinner=False, max_entries=3)
 def telecharger_quotidien_previous(code_dept, n_annees=10):
     """
-    Télécharge le fichier quotidien historique pour un département et ne
-    conserve QUE les n dernières années (par défaut 10) + les colonnes
-    utiles. Le fichier source couvre 1950-~2024 sur toutes les stations
-    du département : sans ce filtrage, il peut représenter plusieurs
-    millions de lignes en mémoire, largement suffisant pour faire sauter
-    le process sur un environnement à mémoire limitée (Streamlit Cloud).
+    Télécharge le fichier quotidien historique (RR-T-Vent : température,
+    précipitations) pour un département et ne conserve que les n dernières
+    années. Sans ce filtrage, le fichier source (1950-~2024, toutes stations
+    du département) peut représenter plusieurs millions de lignes en
+    mémoire — suffisant pour faire sauter le process sur Streamlit Cloud.
 
-    Retourne DataFrame filtré (n dernières années) ou None si indisponible.
+    Retourne DataFrame filtré ou None si indisponible.
     """
     dept = _normaliser_dept(code_dept)
     for nom in _candidats_quot_previous(dept):
@@ -217,9 +214,7 @@ def telecharger_quotidien_previous(code_dept, n_annees=10):
         if df is not None:
             col_date = next((c for c in df.columns if c.upper().startswith("AAAA")), None)
             if col_date is not None:
-                annees = pd.to_numeric(
-                    df[col_date].astype(str).str.slice(0, 4), errors="coerce"
-                )
+                annees = pd.to_numeric(df[col_date].astype(str).str.slice(0, 4), errors="coerce")
                 annee_max = annees.max()
                 if pd.notna(annee_max):
                     df = df[annees >= (annee_max - n_annees + 1)].copy()
@@ -229,10 +224,63 @@ def telecharger_quotidien_previous(code_dept, n_annees=10):
 
 
 # ==============================================================================
+# TELECHARGEMENT QUOTIDIEN — ETP (fichier "autres-parametres")
+# ==============================================================================
+#
+# Le fichier RR-T-Vent (ci-dessus) ne contient PAS l'ETP. Elle se trouve dans
+# le fichier compagnon "autres-parametres", même bucket, même département,
+# même logique de nommage. Confirmé par la documentation d'un outil tiers
+# (loicduffar/meteo.data-Tools) : "Ce script traite uniquement le fichier
+# RR-T-vent [...] à l'exclusion du fichier autres-parametres contenant
+# notamment l'ETP."
+#
+# ⚠️ Nom exact de la colonne ETP non confirmé directement (aucun accès au
+# fichier réel possible en test). Plusieurs candidats sont testés
+# automatiquement (voir COLONNES_METEO["etp_officielle_mm"]). En cas d'échec
+# silencieux, activer le Mode debug dans l'app pour inspecter les colonnes
+# réelles du fichier téléchargé.
+
+def _candidats_quot_autres_params(dept):
+    a = datetime.datetime.utcnow().year
+    candidats = [
+        f"Q_{dept}_previous-1950-{fin}_autres-parametres.csv.gz"
+        for fin in range(a - 1, a - 8, -1)
+    ]
+    candidats += [f"Q_{dept}_previous-1950-{fin}.csv.gz" for fin in range(a - 1, a - 4, -1)]
+    return candidats
+
+
+@st.cache_data(ttl=86400, show_spinner=False, max_entries=3)
+def telecharger_quotidien_etp(code_dept, n_annees=10):
+    """
+    Télécharge le fichier quotidien "autres-parametres" (contient l'ETP
+    officielle Penman-Monteith) pour un département, filtré aux n dernières
+    années disponibles.
+
+    Retourne DataFrame ou None si le fichier est indisponible (l'app
+    affiche alors "ETP non disponible" plutôt qu'une estimation de repli).
+    """
+    dept = _normaliser_dept(code_dept)
+    for nom in _candidats_quot_autres_params(dept):
+        df = _telecharger_gz(f"{BASE_URL_QUOT}/{nom}", colonnes_utiles=COLONNES_UTILES)
+        if df is None:
+            continue
+        col_date = next((c for c in df.columns if c.upper().startswith("AAAA")), None)
+        if col_date is not None:
+            annees = pd.to_numeric(df[col_date].astype(str).str.slice(0, 4), errors="coerce")
+            annee_max = annees.max()
+            if pd.notna(annee_max):
+                df = df[annees >= (annee_max - n_annees + 1)].copy()
+        df["_fichier_source"] = nom
+        return df
+    return None
+
+
+# ==============================================================================
 # INSPECTION DES STATIONS (étape intermédiaire)
 # ==============================================================================
 
-def inspecter_stations(df_brut, df_quot, df_decadagro, lat, lon, n=10):
+def inspecter_stations(df_brut, df_quot, df_quot_etp, lat, lon, n=10):
     """
     Retourne un DataFrame décrivant les n stations les plus proches avec :
       - NUM_POSTE, NOM_USUEL, LAT, LON, ALTI, distance_km
@@ -241,6 +289,9 @@ def inspecter_stations(df_brut, df_quot, df_decadagro, lat, lon, n=10):
       - nebulo_dispo      : True si colonne N présente et non vide
       - historique_dispo  : True si la station est présente dans le fichier quotidien
       - etp_dispo         : True si des valeurs ETP officielles exploitables existent
+                             (vérifié via la même logique que le calcul réel, pour
+                             garantir que le tableau ne promet jamais une donnée
+                             que le graphique ne pourra pas afficher)
     """
     cols_base = [c for c in ["NUM_POSTE", "NOM_USUEL", "LAT", "LON", "ALTI"]
                  if c in df_brut.columns]
@@ -306,26 +357,19 @@ def inspecter_stations(df_brut, df_quot, df_decadagro, lat, lon, n=10):
     else:
         df_sta["historique_dispo"] = False
 
-    # ETP officielle disponible : station présente dans le fichier décadaire
-    # agro ET disposant de valeurs ETP réellement exploitables (la colonne
-    # peut exister dans le fichier mais être vide pour certaines stations).
-    if df_decadagro is not None and not df_decadagro.empty and "NUM_POSTE" in df_decadagro.columns:
-        df_dec_norm = normaliser_variables(df_decadagro)
-        if "etp_officielle_mm" in df_dec_norm.columns:
-            ids_etp = set(
-                df_dec_norm.loc[df_dec_norm["etp_officielle_mm"].notna(), "NUM_POSTE"]
-                .astype(str).unique()
-            )
-        else:
-            ids_etp = set()
-        df_sta["etp_dispo"] = df_sta["NUM_POSTE"].astype(str).isin(ids_etp)
+    # ETP disponible : on réutilise calculer_etp_officielle_mensuelle station
+    # par station pour garantir que le tableau ne promet une donnée que si
+    # le graphique pourra réellement l'afficher (même logique de parsing).
+    if df_quot_etp is not None and not df_quot_etp.empty and "NUM_POSTE" in df_quot_etp.columns:
+        etp_ok = []
+        for sid in df_sta["NUM_POSTE"].astype(str):
+            res = calculer_etp_officielle_mensuelle(df_quot_etp, [sid], n_annees=10)
+            etp_ok.append(res is not None and not res.empty)
+        df_sta["etp_dispo"] = etp_ok
     else:
         df_sta["etp_dispo"] = False
 
     return df_sta
-
-
-
 
 
 # ==============================================================================
@@ -431,7 +475,7 @@ def agreger_multi_stations(df_obs, df_stations):
 
 
 # ==============================================================================
-# NORMALES DECENNALES 1991-2020
+# NORMALES SUR ~10 ANS (température, précipitations)
 # ==============================================================================
 
 def calculer_normales(df_quot, ids_stations, n_annees=10):
@@ -478,7 +522,6 @@ def calculer_normales(df_quot, ids_stations, n_annees=10):
     df["mois"]  = df["date_dt"].dt.month
     df["annee"] = df["date_dt"].dt.year
 
-    # Agrégation journalière → mensuelle → normale
     agg_j = {}
     if colonne_presente(df, "t_celsius"):
         agg_j["t_moy_j"] = ("t_celsius", "mean")
@@ -512,84 +555,22 @@ def calculer_normales(df_quot, ids_stations, n_annees=10):
     return result
 
 
-
 # ==============================================================================
-# EVAPOTRANSPIRATION OFFICIELLE (Penman-Monteith, fichier quotidien "autres-parametres")
+# EVAPOTRANSPIRATION OFFICIELLE — NORMALE (climatologie ~10 ans)
 # ==============================================================================
-#
-# Source : fichier quotidien Météo-France Q_{dept}_{serie}_autres-parametres.csv.gz
-# — le fichier compagnon de Q_{dept}_{serie}_RR-T-Vent.csv.gz (déjà utilisé pour
-# les normales de température), contenant notamment la variable ETP.
-#
-# Le fichier DECADAGRO initialement ciblé s'est révélé introuvable (404
-# systématique, quel que soit le millésime testé). Le fichier "autres-parametres"
-# est confirmé comme la bonne source par la documentation d'un outil tiers
-# d'exploitation de ces mêmes données (loicduffar/meteo.data-Tools) :
-# "Ce script traite uniquement le fichier RR-T-vent [...] à l'exclusion du
-# fichier autres-parametres contenant notamment l'ETP."
-#
-# ⚠️ Nom exact de la colonne ETP non confirmé directement (aucun accès au
-# fichier réel possible en test). Plusieurs candidats sont testés automatiquement.
-# En cas d'échec silencieux, activer le Mode debug dans l'app pour inspecter les
-# colonnes réelles du fichier téléchargé et ajuster si besoin la liste
-# "etp_officielle_mm" dans COLONNES_METEO.
-
-def _candidats_quot_autres_params(dept):
-    """
-    Fichier quotidien 'autres-parametres' — même bucket, même département,
-    même logique de nommage que _candidats_quot_previous (RR-T-Vent) :
-    la borne haute de la période "previous" change chaque année, on teste
-    plusieurs valeurs récentes.
-    """
-    a = datetime.datetime.utcnow().year
-    candidats = [
-        f"Q_{dept}_previous-1950-{fin}_autres-parametres.csv.gz"
-        for fin in range(a - 1, a - 8, -1)
-    ]
-    # Repli sans suffixe, au cas où le fichier ne le porterait pas
-    candidats += [
-        f"Q_{dept}_previous-1950-{fin}.csv.gz"
-        for fin in range(a - 1, a - 4, -1)
-    ]
-    return candidats
-
-
-@st.cache_data(ttl=86400, show_spinner=False, max_entries=3)
-def telecharger_quotidien_etp(code_dept, n_annees=10):
-    """
-    Télécharge le fichier quotidien "autres-parametres" (contient l'ETP
-    officielle Penman-Monteith) pour un département, filtré aux n dernières
-    années disponibles.
-
-    Retourne DataFrame ou None si le fichier est indisponible (auquel cas
-    l'app affiche alors "ETP non disponible").
-    """
-    dept = _normaliser_dept(code_dept)
-    for nom in _candidats_quot_autres_params(dept):
-        df = _telecharger_gz(f"{BASE_URL_QUOT}/{nom}", colonnes_utiles=COLONNES_UTILES)
-        if df is None:
-            continue
-
-        col_date = next((c for c in df.columns if c.upper().startswith("AAAA")), None)
-        if col_date is not None:
-            annees = pd.to_numeric(df[col_date].astype(str).str.slice(0, 4), errors="coerce")
-            annee_max = annees.max()
-            if pd.notna(annee_max):
-                df = df[annees >= (annee_max - n_annees + 1)].copy()
-
-        df["_fichier_source"] = nom
-        return df
-    return None
-
 
 def calculer_etp_officielle_mensuelle(df_quot_etp, ids_stations, n_annees=10):
     """
-    Calcule la moyenne mensuelle de l'ETP officielle (Penman-Monteith) sur
+    Calcule la normale mensuelle de l'ETP officielle (Penman-Monteith) sur
     les n dernières années, à partir du fichier quotidien "autres-parametres".
 
+    L'ETP est une grandeur CUMULATIVE comme la pluie : on somme les valeurs
+    quotidiennes du mois, puis on moyenne ce cumul mensuel sur les années
+    (et non l'inverse — une moyenne de valeurs quotidiennes sous-estimerait
+    fortement le total mensuel réel).
+
     Retourne DataFrame (mois, etp_officielle_mm) avec attrs annee_min/max,
-    ou None si la colonne ETP n'a pas été reconnue dans le fichier
-    (schéma inattendu) ou si les données sont insuffisantes.
+    ou None si la colonne ETP n'a pas été reconnue ou données insuffisantes.
     """
     if df_quot_etp is None or df_quot_etp.empty:
         return None
@@ -620,12 +601,175 @@ def calculer_etp_officielle_mensuelle(df_quot_etp, ids_stations, n_annees=10):
     if df.empty:
         return None
 
-    # Moyenne quotidienne → mensuelle (moyenne des jours du mois) → normale
-    df_mens = df.groupby(["annee", "mois"])["etp_officielle_mm"].mean().reset_index()
+    # Cumul quotidien -> mensuel, puis moyenne des cumuls sur les années
+    df_mens = df.groupby(["annee", "mois"])["etp_officielle_mm"].sum().reset_index()
     result  = df_mens.groupby("mois")["etp_officielle_mm"].mean().reset_index()
     result.attrs["annee_min"] = int(annee_min)
     result.attrs["annee_max"] = int(annee_max)
     return result
+
+
+# ==============================================================================
+# EVAPOTRANSPIRATION OFFICIELLE — PERIODE SELECTIONNEE
+# ==============================================================================
+
+def calculer_etp_periode(df_quot_etp, ids_stations, date_debut, date_fin):
+    """
+    Calcule l'ETP mensuelle (cumul) sur la période exactement sélectionnée
+    par l'utilisateur — contrairement à calculer_etp_officielle_mensuelle,
+    qui calcule une normale climatologique sur les n dernières années.
+
+    Retourne DataFrame (mois, etp_observee_mm) — un point par mois
+    calendaire réellement couvert par la période. None si données insuffisantes.
+    """
+    if df_quot_etp is None or df_quot_etp.empty:
+        return None
+
+    df = df_quot_etp[
+        df_quot_etp["NUM_POSTE"].astype(str).isin([str(i) for i in ids_stations])
+    ].copy()
+    if df.empty:
+        return None
+
+    df = normaliser_variables(df)
+    if not colonne_presente(df, "etp_officielle_mm"):
+        return None
+
+    col_date = next((c for c in df.columns if c.upper().startswith("AAAA")), None)
+    if col_date is None:
+        return None
+
+    df["date_dt"] = pd.to_datetime(
+        df[col_date].astype(str).str.strip().str[:8],
+        format="%Y%m%d", errors="coerce"
+    )
+    df = df.dropna(subset=["date_dt"])
+
+    d1 = pd.Timestamp(date_debut)
+    d2 = pd.Timestamp(date_fin)
+    if d1.tzinfo is not None:
+        d1 = d1.tz_localize(None)
+    if d2.tzinfo is not None:
+        d2 = d2.tz_localize(None)
+    df = df[(df["date_dt"] >= d1) & (df["date_dt"] <= d2)]
+    if df.empty:
+        return None
+
+    df["annee"] = df["date_dt"].dt.year
+    df["mois"]  = df["date_dt"].dt.month
+
+    df_mens = df.groupby(["annee", "mois"])["etp_officielle_mm"].sum().reset_index()
+    result  = df_mens.groupby("mois")["etp_officielle_mm"].mean().reset_index()
+    result.rename(columns={"etp_officielle_mm": "etp_observee_mm"}, inplace=True)
+    return result
+
+
+def recuperer_etp_journaliere(df_quot_etp, ids_stations, date_debut, date_fin):
+    """
+    Retourne la série ETP JOURNALIÈRE brute (une ligne par jour) sur la
+    période sélectionnée — pour un graphique à résolution fine (analogue
+    au "suivi journalier" des températures/précipitations).
+
+    Note : l'ETP Penman-Monteith est calculée par Météo-France à l'échelle
+    quotidienne — aucune donnée horaire n'existe pour cette variable, donc
+    ce graphique reste toujours à résolution journalière.
+
+    Si plusieurs stations sont sélectionnées, la valeur du jour est la
+    moyenne simple entre stations (l'ETP est ponctuelle, pas cumulative
+    entre postes comme peut l'être la pluie).
+
+    Retourne DataFrame (date_dt, etp_mm), trié par date. None si indisponible.
+    """
+    if df_quot_etp is None or df_quot_etp.empty:
+        return None
+
+    df = df_quot_etp[
+        df_quot_etp["NUM_POSTE"].astype(str).isin([str(i) for i in ids_stations])
+    ].copy()
+    if df.empty:
+        return None
+
+    df = normaliser_variables(df)
+    if not colonne_presente(df, "etp_officielle_mm"):
+        return None
+
+    col_date = next((c for c in df.columns if c.upper().startswith("AAAA")), None)
+    if col_date is None:
+        return None
+
+    df["date_dt"] = pd.to_datetime(
+        df[col_date].astype(str).str.strip().str[:8],
+        format="%Y%m%d", errors="coerce"
+    )
+    df = df.dropna(subset=["date_dt", "etp_officielle_mm"])
+
+    d1 = pd.Timestamp(date_debut)
+    d2 = pd.Timestamp(date_fin)
+    if d1.tzinfo is not None:
+        d1 = d1.tz_localize(None)
+    if d2.tzinfo is not None:
+        d2 = d2.tz_localize(None)
+    df = df[(df["date_dt"] >= d1) & (df["date_dt"] <= d2)]
+    if df.empty:
+        return None
+
+    result = (
+        df.groupby("date_dt")["etp_officielle_mm"]
+        .mean()
+        .reset_index()
+        .rename(columns={"etp_officielle_mm": "etp_mm"})
+        .sort_values("date_dt")
+    )
+    return result
+
+
+# ==============================================================================
+# INTENSITE DES PRECIPITATIONS
+# ==============================================================================
+
+def calculer_intensite_pluie(df_agg):
+    """
+    Calcule des indicateurs d'intensité pluviométrique horaire à partir de
+    la colonne rr1_mm déjà agrégée (fichier horaire ou SYNOP). Purement
+    descriptif — aucune statistique de retour ni courbe IDF (nécessiterait
+    un historique long et homogène + ajustement statistique dédié, hors
+    périmètre ici).
+
+    Retourne dict avec :
+      - intensite_max_mmh   : intensité horaire maximale observée
+      - date_max            : horodate de cette valeur
+      - total_heures_pluie  : nb d'heures avec précipitations > 0
+      - repartition         : DataFrame (classe, nb_heures, pct_heures_pluie)
+    """
+    if df_agg is None or df_agg.empty or "rr1_mm" not in df_agg.columns:
+        return None
+
+    df = df_agg[["date_dt", "rr1_mm"]].dropna()
+    if df.empty:
+        return None
+
+    idx_max = df["rr1_mm"].idxmax()
+    intensite_max = df.loc[idx_max, "rr1_mm"]
+    date_max = df.loc[idx_max, "date_dt"]
+
+    total_heures_pluie = (df["rr1_mm"] > 0).sum()
+
+    lignes = []
+    for label, (lo, hi) in SEUILS_INTENSITE_PLUIE.items():
+        n = ((df["rr1_mm"] > lo) & (df["rr1_mm"] <= hi)).sum() if hi != float("inf") \
+            else (df["rr1_mm"] > lo).sum()
+        lignes.append({
+            "classe": label,
+            "nb_heures": int(n),
+            "pct_heures_pluie": round(100 * n / total_heures_pluie, 1) if total_heures_pluie else 0.0,
+        })
+
+    return {
+        "intensite_max_mmh": float(intensite_max),
+        "date_max": date_max,
+        "total_heures_pluie": int(total_heures_pluie),
+        "repartition": pd.DataFrame(lignes),
+    }
 
 
 # ==============================================================================
