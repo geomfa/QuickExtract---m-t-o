@@ -25,6 +25,7 @@ from mf_client import (
     telecharger_horaire_departement,
     telecharger_quotidien_previous,
     telecharger_quotidien_etp,
+    telecharger_quotidien_etp_latest,
     inspecter_stations,
     filtrer_periode,
     normaliser_variables,
@@ -73,7 +74,8 @@ _DEFAULTS = {
     "code_dept_actif": None,
     "df_brut":         None,
     "df_quot":         None,
-    "df_decadagro":    None,   # contient en réalité le fichier "autres-parametres" (ETP)
+    "df_decadagro":    None,   # fichier "autres-parametres" historique (ETP, ~10 ans)
+    "df_etp_latest":   None,   # fichier "autres-parametres" récent (ETP, 1-2 ans glissants)
     "df_inspect":      None,
     "selection":       None,
     "periode_active":  None,
@@ -200,6 +202,7 @@ if st.sidebar.button(
     st.session_state["df_brut"]         = None
     st.session_state["df_quot"]         = None
     st.session_state["df_decadagro"]    = None
+    st.session_state["df_etp_latest"]   = None
     st.session_state["df_inspect"]      = None
     st.session_state["selection"]       = None
     st.session_state["periode_active"]  = None
@@ -213,8 +216,9 @@ if st.sidebar.button(
             st.sidebar.error(str(e))
             st.stop()
     with st.spinner("Chargement des données historiques..."):
-        st.session_state["df_quot"]      = telecharger_quotidien_previous(code_dept)
-        st.session_state["df_decadagro"] = telecharger_quotidien_etp(code_dept)
+        st.session_state["df_quot"]       = telecharger_quotidien_previous(code_dept)
+        st.session_state["df_decadagro"]  = telecharger_quotidien_etp(code_dept)
+        st.session_state["df_etp_latest"] = telecharger_quotidien_etp_latest(code_dept)
     _df_quot      = st.session_state["df_quot"]
     _df_decadagro = st.session_state["df_decadagro"]
     with st.spinner("Inspection des stations..."):
@@ -502,22 +506,31 @@ else:
     label_normale = "Normale (réf.)"
 
 # ------------------------------------------------------------------------------
-# Évapotranspiration officielle Penman-Monteith (fichier quotidien
-# "autres-parametres", déjà téléchargé à l'étape 1 — st.session_state["df_decadagro"]).
-# Basée sur les stations qui ont réellement de l'ETP disponible (ids_etp_dispo),
-# indépendamment des stations choisies pour temp./précip. — car ETP et météo
-# horaire ne viennent pas forcément des mêmes postes.
+# Évapotranspiration officielle Penman-Monteith. Deux fichiers combinés :
+#   - df_decadagro : historique ~10 ans (pour la normale mensuelle)
+#   - df_etp_latest : 1-2 ans glissants (pour couvrir les périodes courtes/
+#     récentes, absentes du fichier historique qui s'arrête avant l'année
+#     en cours)
+# Basée sur les stations qui ont réellement de l'ETP disponible
+# (ids_etp_dispo), indépendamment des stations choisies pour temp./précip.
 # ------------------------------------------------------------------------------
 
-df_quot_etp = st.session_state["df_decadagro"]
+_df_etp_hist   = st.session_state["df_decadagro"]
+_df_etp_recent = st.session_state["df_etp_latest"]
+
+_frames_etp = [d for d in [_df_etp_hist, _df_etp_recent] if d is not None and not d.empty]
+df_etp_combine = pd.concat(_frames_etp, ignore_index=True) if _frames_etp else None
 
 if debug_etp:
-    st.subheader("Debug — fichier ETP (quotidien, autres-parametres)")
-    if df_quot_etp is None:
+    st.subheader("Debug — fichier ETP (historique + récent combinés)")
+    if df_etp_combine is None:
         st.warning("Aucun fichier ETP téléchargé (échec ou indisponible).")
     else:
-        st.write(f"Colonnes ({len(df_quot_etp.columns)}) :", list(df_quot_etp.columns))
-        st.dataframe(df_quot_etp.head(10), use_container_width=True)
+        st.write(f"Colonnes ({len(df_etp_combine.columns)}) :", list(df_etp_combine.columns))
+        st.write(f"{len(df_etp_combine)} lignes au total "
+                 f"(historique : {len(_df_etp_hist) if _df_etp_hist is not None else 0}, "
+                 f"récent : {len(_df_etp_recent) if _df_etp_recent is not None else 0})")
+        st.dataframe(df_etp_combine.head(10), use_container_width=True)
 
 # Stations réellement disponibles pour l'ETP (colonne etp_dispo du tableau
 # d'inspection) — peut différer des stations choisies pour temp./précip.
@@ -527,15 +540,15 @@ ids_etp_dispo = (
 )
 ids_pour_etp = ids_etp_dispo or ids_selec
 
-_etp_officielle = calculer_etp_officielle_mensuelle(df_quot_etp, ids_pour_etp, n_annees=10)
+_etp_officielle = calculer_etp_officielle_mensuelle(df_etp_combine, ids_pour_etp, n_annees=10)
 
 df_etp_normale = (
     _etp_officielle.rename(columns={"etp_officielle_mm": "etp_normale_mm"})
     if _etp_officielle is not None else None
 )
 
-etp_periode_mens = calculer_etp_periode(df_quot_etp, ids_pour_etp, date_debut, date_fin)
-etp_journaliere  = recuperer_etp_journaliere(df_quot_etp, ids_pour_etp, date_debut, date_fin)
+etp_periode_mens = calculer_etp_periode(df_etp_combine, ids_pour_etp, date_debut, date_fin)
+etp_journaliere  = recuperer_etp_journaliere(df_etp_combine, ids_pour_etp, date_debut, date_fin)
 
 titre_base  = nom_commune or f"dept. {st.session_state['code_dept_actif']}"
 prefixe_nom = titre_base.replace(" ", "_")
@@ -769,7 +782,9 @@ if not is_long_period and etp_journaliere is not None:
     st.subheader("Évapotranspiration journalière")
     fig = graphique_etp_journalier(
         etp_journaliere,
+        df_normales=df_etp_normale,
         titre=f"Évapotranspiration journalière — {titre_base}",
+        label_normale=label_normale,
     )
     if fig:
         _afficher(fig, f"etp_journalier_{prefixe_nom}_{periode_nom}.png",

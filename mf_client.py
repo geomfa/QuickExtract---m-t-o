@@ -275,6 +275,33 @@ def telecharger_quotidien_etp(code_dept, n_annees=10):
         return df
     return None
 
+def _candidats_quot_etp_latest(dept):
+    """
+    Fichier quotidien "autres-parametres" récent (couvre depuis janvier de
+    l'année précédente jusqu'à J-1/J-2) — nécessaire pour l'ETP journalière
+    sur les périodes courtes, absente du fichier "previous" qui s'arrête
+    avant l'année en cours.
+    """
+    a = datetime.datetime.utcnow().year
+    return [
+        f"Q_{dept}_latest-{a-1}-{a}_autres-parametres.csv.gz",
+        f"Q_{dept}_latest-{a}-{a+1}_autres-parametres.csv.gz",
+        f"Q_{dept}_latest-{a-2}-{a-1}_autres-parametres.csv.gz",
+    ]
+
+@st.cache_data(ttl=1800, show_spinner=False, max_entries=3)
+def telecharger_quotidien_etp_latest(code_dept):
+    """
+    Télécharge le fichier ETP récent (1-2 ans glissants). Retourne None
+    si indisponible.
+    """
+    dept = _normaliser_dept(code_dept)
+    for nom in _candidats_quot_etp_latest(dept):
+        df = _telecharger_gz(f"{BASE_URL_QUOT}/{nom}", colonnes_utiles=COLONNES_UTILES)
+        if df is not None:
+            df["_fichier_source"] = nom
+            return df
+    return None
 
 # ==============================================================================
 # INSPECTION DES STATIONS (étape intermédiaire)
