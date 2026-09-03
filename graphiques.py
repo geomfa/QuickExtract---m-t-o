@@ -429,3 +429,135 @@ def graphique_temperatures_annuelles(df_annuel, titre="Évolution des températu
     _source(fig)
     plt.tight_layout()
     return fig
+
+# ==============================================================================
+# 7. ETP JOURNALIÈRE (résolution fine, périodes courtes)
+# ==============================================================================
+
+def graphique_etp_journalier(df_etp_jour, titre="Évapotranspiration journalière"):
+    """
+    Série ETP journalière brute sur la période sélectionnée — résolution
+    fine, analogue au suivi journalier température/précipitations.
+    L'ETP Penman-Monteith n'existe qu'à l'échelle quotidienne chez
+    Météo-France (pas de donnée horaire) : ce graphique reste toujours
+    journalier, quelle que soit la finesse des autres graphiques affichés.
+    """
+    if df_etp_jour is None or df_etp_jour.empty:
+        return None
+
+    fig, ax = plt.subplots(figsize=(13, 4.5))
+    x = np.arange(len(df_etp_jour))
+
+    ax.bar(x, df_etp_jour["etp_mm"], color=C_ETP, alpha=0.85, width=0.7)
+    ax.set_ylabel("ETP (mm/jour)", fontsize=10)
+    ax.grid(axis="y", linestyle="--", alpha=0.3)
+
+    n = len(df_etp_jour)
+    pas = max(1, n // 15)
+    fmt = "%d/%m" if n <= 62 else "%m/%Y"
+    labels = [pd.Timestamp(d).strftime(fmt) for d in df_etp_jour["date_dt"]]
+    ax.set_xticks(x[::pas])
+    ax.set_xticklabels(labels[::pas], rotation=35, ha="right", fontsize=9)
+
+    ax.set_title(titre, fontsize=12, fontweight="bold")
+    _source(fig)
+    plt.tight_layout()
+    return fig
+
+
+# ==============================================================================
+# 8. BILAN ANNUEL — normale vs période écoulée
+# ==============================================================================
+
+def graphique_bilan_annuel_etp(etp_normale_an, etp_observee_an,
+                                precip_normale_an=None, precip_observee_an=None,
+                                titre="Bilan annuel — normale vs période écoulée",
+                                label_normale=DEFAULT_LABEL_NORMALE):
+    """
+    Comparaison en barres : totaux annuels ETP (et précipitations si
+    fournies) — normale climatologique vs période réellement sélectionnée.
+
+    etp_normale_an, etp_observee_an : totaux annuels en mm (float)
+    precip_normale_an, precip_observee_an : idem, optionnels
+    """
+    if etp_normale_an is None and etp_observee_an is None:
+        return None
+
+    categories = []
+    valeurs    = []
+    couleurs   = []
+    alphas     = []
+
+    if etp_normale_an is not None:
+        categories.append(f"ETP\n{label_normale}")
+        valeurs.append(etp_normale_an)
+        couleurs.append(C_ETP)
+        alphas.append(0.5)
+    if etp_observee_an is not None:
+        categories.append("ETP\npériode sélectionnée")
+        valeurs.append(etp_observee_an)
+        couleurs.append(C_ETP)
+        alphas.append(1.0)
+    if precip_normale_an is not None:
+        categories.append(f"Précip.\n{label_normale}")
+        valeurs.append(precip_normale_an)
+        couleurs.append(C_PRECIP)
+        alphas.append(0.5)
+    if precip_observee_an is not None:
+        categories.append("Précip.\npériode sélectionnée")
+        valeurs.append(precip_observee_an)
+        couleurs.append(C_PRECIP)
+        alphas.append(1.0)
+
+    fig, ax = plt.subplots(figsize=(9, 5.5))
+    x = np.arange(len(categories))
+    bars = ax.bar(x, valeurs, color=couleurs, width=0.55)
+    for bar, alpha in zip(bars, alphas):
+        bar.set_alpha(alpha)
+
+    for i, v in enumerate(valeurs):
+        ax.text(i, v + max(valeurs) * 0.02, f"{v:.0f} mm", ha="center", fontsize=9)
+
+    ax.set_ylabel("mm / an", fontsize=10)
+    ax.set_xticks(x)
+    ax.set_xticklabels(categories, fontsize=9)
+    ax.grid(axis="y", linestyle="--", alpha=0.3)
+    ax.set_title(titre, fontsize=12, fontweight="bold")
+    _source(fig)
+    plt.tight_layout()
+    return fig
+
+
+# ==============================================================================
+# 9. INTENSITE DES PRECIPITATIONS
+# ==============================================================================
+
+def graphique_intensite_pluie(repartition_df, titre="Répartition des intensités de pluie"):
+    """
+    Histogramme du nombre d'heures de pluie par classe d'intensité.
+    repartition_df : DataFrame (classe, nb_heures, pct_heures_pluie),
+    produit par mf_client.calculer_intensite_pluie().
+    """
+    if repartition_df is None or repartition_df.empty:
+        return None
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    x = np.arange(len(repartition_df))
+    couleurs = ["#B8E0D2", "#6FBF9C", "#2F8FEF", "#9C3B3B"]
+
+    ax.bar(x, repartition_df["nb_heures"],
+           color=couleurs[:len(repartition_df)], alpha=0.9)
+    for i, row in repartition_df.iterrows():
+        ax.text(i, row["nb_heures"] + max(repartition_df["nb_heures"]) * 0.02,
+                f"{row['nb_heures']}h", ha="center", fontsize=9)
+
+    ax.set_ylabel("Nombre d'heures", fontsize=10)
+    ax.set_xticks(x)
+    ax.set_xticklabels(repartition_df["classe"], fontsize=8.5, rotation=15, ha="right")
+    ax.grid(axis="y", linestyle="--", alpha=0.3)
+    ax.set_title(titre, fontsize=12, fontweight="bold")
+    fig.text(0.5, 0.01,
+             "Seuils indicatifs (classification météorologique courante, non normative)",
+             ha="center", fontsize=8, style="italic", color="#777777")
+    plt.tight_layout()
+    return fig

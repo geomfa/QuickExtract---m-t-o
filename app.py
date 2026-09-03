@@ -33,6 +33,9 @@ from mf_client import (
     calculer_etp_officielle_mensuelle,
     colonne_presente,
     debug_colonnes,
+    calculer_etp_periode,
+    recuperer_etp_journaliere,
+    calculer_intensite_pluie,
 )
 from synop_client import (
     stations_synop_proches,
@@ -45,6 +48,9 @@ from graphiques import (
     graphique_etp,
     graphique_histogramme_periode,
     graphique_temperatures_annuelles,
+    graphique_etp_journalier,
+    graphique_bilan_annuel_etp,
+    graphique_intensite_pluie,
 )
 
 # ==============================================================================
@@ -67,7 +73,7 @@ _DEFAULTS = {
     "code_dept_actif": None,
     "df_brut":         None,
     "df_quot":         None,
-    "df_decadagro":    None,
+    "df_decadagro":    None,   # contient en réalité le fichier "autres-parametres" (ETP)
     "df_inspect":      None,
     "selection":       None,
     "periode_active":  None,
@@ -193,6 +199,7 @@ if st.sidebar.button(
     st.session_state["code_dept_actif"] = code_dept
     st.session_state["df_brut"]         = None
     st.session_state["df_quot"]         = None
+    st.session_state["df_decadagro"]    = None
     st.session_state["df_inspect"]      = None
     st.session_state["selection"]       = None
     st.session_state["periode_active"]  = None
@@ -206,7 +213,7 @@ if st.sidebar.button(
             st.sidebar.error(str(e))
             st.stop()
     with st.spinner("Chargement des données historiques..."):
-        st.session_state["df_quot"] = telecharger_quotidien_previous(code_dept)
+        st.session_state["df_quot"]      = telecharger_quotidien_previous(code_dept)
         st.session_state["df_decadagro"] = telecharger_quotidien_etp(code_dept)
     _df_quot      = st.session_state["df_quot"]
     _df_decadagro = st.session_state["df_decadagro"]
@@ -494,23 +501,41 @@ if df_normales is not None:
 else:
     label_normale = "Normale (réf.)"
 
-# Évapotranspiration officielle Penman-Monteith (fichier décadaire agro
-# Météo-France). Basée sur les stations du réseau climatologique (ids_selec),
-# indépendamment de la source utilisée pour les autres variables.
-_df_decadagro = telecharger_quotidien_etp(st.session_state["code_dept_actif"])
+# ------------------------------------------------------------------------------
+# Évapotranspiration officielle Penman-Monteith (fichier quotidien
+# "autres-parametres", déjà téléchargé à l'étape 1 — st.session_state["df_decadagro"]).
+# Basée sur les stations qui ont réellement de l'ETP disponible (ids_etp_dispo),
+# indépendamment des stations choisies pour temp./précip. — car ETP et météo
+# horaire ne viennent pas forcément des mêmes postes.
+# ------------------------------------------------------------------------------
+
+df_quot_etp = st.session_state["df_decadagro"]
+
 if debug_etp:
-    st.subheader("Debug — fichier ETP décadaire")
-    if _df_decadagro is None:
-        st.warning("Aucun fichier décadaire téléchargé (échec ou indisponible).")
+    st.subheader("Debug — fichier ETP (quotidien, autres-parametres)")
+    if df_quot_etp is None:
+        st.warning("Aucun fichier ETP téléchargé (échec ou indisponible).")
     else:
-        st.write(f"Colonnes ({len(_df_decadagro.columns)}) :", list(_df_decadagro.columns))
-        st.dataframe(_df_decadagro.head(10), use_container_width=True)
-_etp_officielle = calculer_etp_officielle_mensuelle(_df_decadagro, ids_selec, n_annees=10)
+        st.write(f"Colonnes ({len(df_quot_etp.columns)}) :", list(df_quot_etp.columns))
+        st.dataframe(df_quot_etp.head(10), use_container_width=True)
+
+# Stations réellement disponibles pour l'ETP (colonne etp_dispo du tableau
+# d'inspection) — peut différer des stations choisies pour temp./précip.
+ids_etp_dispo = (
+    df_inspect.loc[df_inspect.get("etp_dispo", False) == True, "NUM_POSTE"].tolist()
+    if "etp_dispo" in df_inspect.columns else []
+)
+ids_pour_etp = ids_etp_dispo or ids_selec
+
+_etp_officielle = calculer_etp_officielle_mensuelle(df_quot_etp, ids_pour_etp, n_annees=10)
 
 df_etp_normale = (
     _etp_officielle.rename(columns={"etp_officielle_mm": "etp_normale_mm"})
     if _etp_officielle is not None else None
 )
+
+etp_periode_mens = calculer_etp_periode(df_quot_etp, ids_pour_etp, date_debut, date_fin)
+etp_journaliere  = recuperer_etp_journaliere(df_quot_etp, ids_pour_etp, date_debut, date_fin)
 
 titre_base  = nom_commune or f"dept. {st.session_state['code_dept_actif']}"
 prefixe_nom = titre_base.replace(" ", "_")
@@ -608,9 +633,9 @@ if (
 if colonne_presente(df_agg, "ff_ms") and colonne_presente(df_agg, "dd_deg"):
     st.subheader("Rose des vents")
 
-    date_max_dispo   = df_agg["date_dt"].max()
-    date_debut_dm     = date_max_dispo - pd.Timedelta(days=30)
-    df_dernier_mois   = df_agg[df_agg["date_dt"] >= date_debut_dm]
+    date_max_dispo  = df_agg["date_dt"].max()
+    date_debut_dm    = date_max_dispo - pd.Timedelta(days=30)
+    df_dernier_mois  = df_agg[df_agg["date_dt"] >= date_debut_dm]
 
     col_a, col_b = st.columns(2)
 
@@ -706,8 +731,7 @@ if (
     if etp_norm_series is not None:
         df_thermopluvio_export["etp_normale_mm"] = etp_norm_series
 
-# 5. Évapotranspiration — graphe dédié (indépendant de la durée de la période,
-#    montré dès que l'ETP officielle est disponible)
+# 5. Évapotranspiration — graphe dédié mensuel (normale)
 if df_etp_normale is not None:
     st.subheader("Évapotranspiration et bilan hydrique")
     fig = graphique_etp(
@@ -719,7 +743,7 @@ if df_etp_normale is not None:
     if fig:
         _afficher(fig, f"etp_{prefixe_nom}_{periode_nom}.png",
                   "Télécharger — ETP / bilan hydrique")
-elif is_long_period:
+else:
     st.subheader("Évapotranspiration")
     st.caption("ETP officielle non disponible pour ces stations.")
 
@@ -739,6 +763,55 @@ if (
     if fig:
         _afficher(fig, f"temp_annuelles_{prefixe_nom}_{periode_nom}.png",
                   "Télécharger — Températures annuelles")
+
+# 7. ETP journalière — résolution fine, périodes courtes uniquement
+if not is_long_period and etp_journaliere is not None:
+    st.subheader("Évapotranspiration journalière")
+    fig = graphique_etp_journalier(
+        etp_journaliere,
+        titre=f"Évapotranspiration journalière — {titre_base}",
+    )
+    if fig:
+        _afficher(fig, f"etp_journalier_{prefixe_nom}_{periode_nom}.png",
+                  "Télécharger — ETP journalière")
+
+# 8. Bilan annuel ETP/précip — normale vs période écoulée (périodes longues)
+if is_long_period and df_etp_normale is not None:
+    etp_normale_an  = df_etp_normale["etp_normale_mm"].sum()
+    etp_observee_an = etp_periode_mens["etp_observee_mm"].sum() if etp_periode_mens is not None else None
+    precip_normale_an  = (
+        df_normales["precip_norm"].sum()
+        if df_normales is not None and "precip_norm" in df_normales.columns else None
+    )
+    precip_observee_an = df_agg["rr1_mm"].sum() if colonne_presente(df_agg, "rr1_mm") else None
+
+    st.subheader("Bilan annuel — normale vs période écoulée")
+    fig = graphique_bilan_annuel_etp(
+        etp_normale_an, etp_observee_an,
+        precip_normale_an, precip_observee_an,
+        titre=f"Bilan annuel — {titre_base}",
+        label_normale=label_normale,
+    )
+    if fig:
+        _afficher(fig, f"bilan_annuel_{prefixe_nom}_{periode_nom}.png",
+                  "Télécharger — Bilan annuel")
+
+# 9. Intensité des précipitations — quelle que soit la période
+if colonne_presente(df_agg, "rr1_mm"):
+    intensite = calculer_intensite_pluie(df_agg)
+    if intensite is not None:
+        st.subheader("Intensité des précipitations")
+        c1i, c2i = st.columns(2)
+        c1i.metric("Intensité horaire max.", f"{intensite['intensite_max_mmh']:.1f} mm/h",
+                   help=f"Le {intensite['date_max'].strftime('%d/%m/%Y %Hh')}")
+        c2i.metric("Heures de pluie", f"{intensite['total_heures_pluie']} h")
+        fig = graphique_intensite_pluie(
+            intensite["repartition"],
+            titre=f"Répartition des intensités de pluie — {titre_base}",
+        )
+        if fig:
+            _afficher(fig, f"intensite_pluie_{prefixe_nom}_{periode_nom}.png",
+                      "Télécharger — Intensité des pluies")
 
 # ==============================================================================
 # EXPORT CARTOGRAPHIQUE
@@ -804,6 +877,10 @@ with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         _df_etp_export = df_etp_normale.copy()
         _df_etp_export["source"] = "Officielle Penman-Monteith (Météo-France)"
         _df_etp_export.to_excel(writer, sheet_name="ETP_normale", index=False)
+    if etp_periode_mens is not None:
+        etp_periode_mens.to_excel(writer, sheet_name="ETP_periode", index=False)
+    if etp_journaliere is not None:
+        etp_journaliere.to_excel(writer, sheet_name="ETP_journaliere", index=False)
     if df_thermopluvio_export is not None:
         df_thermopluvio_export.to_excel(writer, sheet_name="Thermopluvio_mensuel", index=False)
 
