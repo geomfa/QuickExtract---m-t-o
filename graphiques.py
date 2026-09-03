@@ -434,23 +434,52 @@ def graphique_temperatures_annuelles(df_annuel, titre="Évolution des températu
 # 7. ETP JOURNALIÈRE (résolution fine, périodes courtes)
 # ==============================================================================
 
-def graphique_etp_journalier(df_etp_jour, titre="Évapotranspiration journalière"):
+def graphique_etp_journalier(df_etp_jour, df_normales=None,
+                              titre="Évapotranspiration journalière",
+                              label_normale=DEFAULT_LABEL_NORMALE):
     """
     Série ETP journalière brute sur la période sélectionnée — résolution
     fine, analogue au suivi journalier température/précipitations.
     L'ETP Penman-Monteith n'existe qu'à l'échelle quotidienne chez
     Météo-France (pas de donnée horaire) : ce graphique reste toujours
     journalier, quelle que soit la finesse des autres graphiques affichés.
+
+    Si df_normales est fourni (colonnes mois, etp_normale_mm), superpose
+    une référence journalière obtenue en répartissant la normale mensuelle
+    sur le nombre de jours du mois — c'est une approximation (l'ETP réelle
+    varie jour par jour dans le mois), mais donne un repère de comparaison
+    honnête, clairement étiqueté comme tel.
     """
     if df_etp_jour is None or df_etp_jour.empty:
         return None
 
+    import calendar
+
     fig, ax = plt.subplots(figsize=(13, 4.5))
     x = np.arange(len(df_etp_jour))
 
-    ax.bar(x, df_etp_jour["etp_mm"], color=C_ETP, alpha=0.85, width=0.7)
+    ax.bar(x, df_etp_jour["etp_mm"], color=C_ETP, alpha=0.85, width=0.7,
+           label="ETP observée", zorder=3)
+
+    if df_normales is not None and not df_normales.empty \
+            and "etp_normale_mm" in df_normales.columns:
+        norm_map = dict(zip(df_normales["mois"], df_normales["etp_normale_mm"]))
+        ref_journaliere = []
+        for d in df_etp_jour["date_dt"]:
+            d = pd.Timestamp(d)
+            mois = d.month
+            nb_jours_mois = calendar.monthrange(d.year, mois)[1]
+            val_norm = norm_map.get(mois)
+            ref_journaliere.append(
+                val_norm / nb_jours_mois if val_norm is not None else float("nan")
+            )
+        ax.plot(x, ref_journaliere, color=C_NORM, linewidth=1.6, linestyle="--",
+                label=f"ETP moy./jour — {label_normale}\n(normale mensuelle répartie)",
+                zorder=4)
+
     ax.set_ylabel("ETP (mm/jour)", fontsize=10)
     ax.grid(axis="y", linestyle="--", alpha=0.3)
+    ax.legend(loc="upper left", fontsize=8.5, framealpha=0.92)
 
     n = len(df_etp_jour)
     pas = max(1, n // 15)
