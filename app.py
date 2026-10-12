@@ -26,7 +26,6 @@ import numpy as np
 import pandas as pd
 import folium
 import streamlit as st
-import streamlit.components.v1 as components
 import matplotlib.pyplot as plt
 from streamlit_folium import st_folium
 
@@ -859,38 +858,48 @@ elif has_p and use_synop:
     st.caption("Intensité des pluies non calculée : les observations SYNOP sont tri-horaires.")
 
 # ==============================================================================
-# EXPORT CARTOGRAPHIQUE
+# EXPORT CARTOGRAPHIQUE (carte statique A5 paysage)
 # ==============================================================================
 
 st.subheader("Export cartographique")
 with st.expander("Paramètres de la carte", expanded=False):
     titre_carte = st.text_input("Titre", value=f"Météo — {titre_base}", key="titre_carte")
     auteur_carte = st.text_input("Auteur", value="", key="auteur_carte")
-    fichier_zone = st.file_uploader("Zone d'étude (GeoJSON)", type=["geojson"], key="upload_zone")
+    fichier_zone = st.file_uploader(
+        "Zone d'étude (GeoJSON, facultatif). Sans fichier, le point d'étude est affiché.",
+        type=["geojson", "json"], key="upload_zone")
     fichier_logo = st.file_uploader("Logo (PNG)", type=["png"], key="upload_logo")
 
     if st.button("Générer la carte", key="btn_carte"):
         with st.spinner("Génération de la carte..."):
             try:
-                from carte_folium import generer_carte_folium, charger_zone_geojson
-                df_carte = choix[["NUM_POSTE", "NOM_USUEL", "LAT", "LON", "distance_km"]].copy()
-                if use_synop and not df_stations_synop.empty:
-                    df_carte = pd.concat(
-                        [df_carte, df_stations_synop[["NUM_POSTE", "NOM_USUEL", "LAT", "LON",
-                                                      "distance_km"]]], ignore_index=True)
-                gdf_zone = charger_zone_geojson(fichier_zone) if fichier_zone else None
-                logo_bytes = fichier_logo.read() if fichier_logo else None
-                html_carte = generer_carte_folium(
-                    df_stations=df_carte, titre=titre_carte, gdf_zone=gdf_zone,
-                    logo_bytes=logo_bytes, auteur=auteur_carte,
-                    sources="Météo-France, OpenStreetMap contributors",
+                from carte_statique import generer_carte_statique, charger_zone_geojson
+                zone_gj = charger_zone_geojson(fichier_zone) if fichier_zone else None
+                if fichier_zone and zone_gj is None:
+                    st.warning("GeoJSON illisible : le point d'étude est affiché à la place.")
+                png, pdf, fond_ok = generer_carte_statique(
+                    df_stations=choix[["NUM_POSTE", "NOM_USUEL", "LAT", "LON", "distance_km"]],
+                    point=(zone["lat"], zone["lon"], zone["nom"]),
+                    zone_geojson=zone_gj,
+                    df_synop=df_stations_synop if (use_synop and not df_stations_synop.empty) else None,
+                    titre=titre_carte,
+                    logo_bytes=fichier_logo.read() if fichier_logo else None,
+                    auteur=auteur_carte,
                 )
-                components.html(html_carte, height=500, scrolling=False)
-                st.download_button("Télécharger la carte (HTML)", data=html_carte.encode(),
-                                   file_name=f"carte_{prefixe_nom}_{periode_nom}.html",
-                                   mime="text/html", key="dl_carte")
+                if not fond_ok:
+                    st.warning("Fond OpenStreetMap indisponible (réseau) : carte sans fond.")
+                st.session_state["carte_png"] = png
+                st.session_state["carte_pdf"] = pdf
             except Exception as e:
                 st.error(f"Erreur lors de la génération de la carte : {e}")
+
+    if st.session_state.get("carte_png"):
+        st.image(st.session_state["carte_png"])
+        cc1, cc2 = st.columns(2)
+        cc1.download_button("Télécharger la carte (PNG)", data=st.session_state["carte_png"],
+                            file_name=f"carte_{prefixe_nom}.png", mime="image/png", key="dl_carte_png")
+        cc2.download_button("Télécharger la carte (PDF)", data=st.session_state["carte_pdf"],
+                            file_name=f"carte_{prefixe_nom}.pdf", mime="application/pdf", key="dl_carte_pdf")
 
 # ==============================================================================
 # EXPORT EXCEL
