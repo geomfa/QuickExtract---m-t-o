@@ -187,7 +187,17 @@ def telecharger_synop_periode(ids_stations, date_debut, date_fin):
         df["ff_ms"] = pd.to_numeric(df["ff"], errors="coerce")
     if "dd" in df.columns:
         df["dd_deg"] = pd.to_numeric(df["dd"], errors="coerce")
-    if "rr1" in df.columns:
-        df["rr1_mm"] = pd.to_numeric(df["rr1"], errors="coerce")
+    # Les observations SYNOP sont tri-horaires : le cumul de la période est la
+    # somme de rr3 (précipitations des 3 dernières heures). Sommer rr1 sous-estimerait
+    # le total. La colonne garde le nom rr1_mm pour rester compatible avec le reste
+    # de l'app, mais la valeur est un cumul par pas de temps (3 h). Valeur -0,1 = traces.
+    rr3 = pd.to_numeric(df["rr3"], errors="coerce") if "rr3" in df.columns else None
+    rr1 = pd.to_numeric(df["rr1"], errors="coerce") if "rr1" in df.columns else None
+    if rr3 is not None and rr1 is not None:
+        rr = rr3.where(rr3.notna(), rr1)
+    else:
+        rr = rr3 if rr3 is not None else rr1
+    if rr is not None:
+        df["rr1_mm"] = rr.clip(lower=0)
 
     return df
