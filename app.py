@@ -6,9 +6,9 @@ Flux :
   1. La zone d'étude est définie (code INSEE, carte ou coordonnées) puis
      "1 - Chercher les stations" télécharge les fichiers du département et
      liste les stations les plus proches.
-  2. Dans le tableau, on coche pour chaque station ce qui doit être calculé
-     (vent, T° / précipitations, ETP). Tous les calculs d'une variable
-     utilisent exactement les stations cochées.
+  2. On coche les calculs voulus (vent, T° / précipitations, ETP) puis, dans le
+     tableau, les stations à utiliser. Tous les calculs reposent sur les mêmes
+     stations ; une station sans une variable ne contribue simplement pas à ce calcul.
   3. "2 - Lancer l'analyse" produit graphiques et exports.
 
 Les observations viennent du fichier horaire départemental. Le réseau SYNOP
@@ -82,11 +82,9 @@ SOURCE_LABEL = "Source : Météo-France — Données climatologiques de base (da
 
 SEUIL_PERIODE_LONGUE = 31   # jours : au-delà, graphiques de type climatologie mensuelle
 N_STATIONS_SYNOP = 3
-N_STATIONS_DEFAUT = 3       # stations cochées par défaut pour chaque variable
+N_STATIONS_DEFAUT = 3       # stations cochées par défaut (les plus proches)
 
-COL_VENT = "Vent"
-COL_METEO = "T° / précip."
-COL_ETP = "ETP"
+COL_UTIL = "Utiliser"
 
 # ==============================================================================
 # SESSION STATE
@@ -397,10 +395,15 @@ st.caption(
 
 st.subheader("Stations disponibles")
 st.caption(
-    "Cochez, pour chaque station, les calculs à réaliser. Chaque calcul utilise "
-    "exactement les stations cochées dans sa colonne. Une case n'est prise en "
-    "compte que si la donnée existe pour la station."
+    "Choisissez les calculs, puis cochez les stations à utiliser. Tous les calculs "
+    "reposent sur les mêmes stations : une station qui n'a pas une variable (vent, ETP...) "
+    "ne contribue simplement pas à ce calcul. Les colonnes « dispo » aident à choisir."
 )
+
+k1, k2, k3 = st.columns(3)
+veut_vent = k1.checkbox("Vent (rose des vents)", value=True, key="calc_vent")
+veut_meteo = k2.checkbox("T° et précipitations", value=True, key="calc_meteo")
+veut_etp = k3.checkbox("ETP", value=True, key="calc_etp")
 
 di = df_inspect.reset_index(drop=True)
 di["NUM_POSTE"] = di["NUM_POSTE"].astype(str)
@@ -408,6 +411,7 @@ if "NOM_USUEL" not in di.columns:
     di["NOM_USUEL"] = di["NUM_POSTE"]
 
 base = pd.DataFrame({
+    COL_UTIL: np.arange(len(di)) < N_STATIONS_DEFAUT,
     "Code": di["NUM_POSTE"],
     "Nom": di["NOM_USUEL"],
     "Dist. (km)": di["distance_km"],
@@ -419,11 +423,8 @@ base = pd.DataFrame({
     "Vent dispo": _oui_non(di["vent_dispo"]),
     "T°/précip. dispo": _oui_non(di["meteo_dispo"]),
     "ETP dispo": _oui_non(di["etp_dispo"]),
-    COL_VENT: _defaut(di["vent_dispo"]),
-    COL_METEO: _defaut(di["meteo_dispo"]),
-    COL_ETP: _defaut(di["etp_dispo"]),
 })
-cols_info = [c for c in base.columns if c not in (COL_VENT, COL_METEO, COL_ETP)]
+cols_info = [c for c in base.columns if c != COL_UTIL]
 
 df_choix = st.data_editor(
     base,
@@ -431,48 +432,39 @@ df_choix = st.data_editor(
     hide_index=True,
     width="stretch",
     disabled=cols_info,
-    column_config={
-        COL_VENT: st.column_config.CheckboxColumn(COL_VENT, help="Rose des vents"),
-        COL_METEO: st.column_config.CheckboxColumn(
-            COL_METEO, help="Températures, précipitations, normales"),
-        COL_ETP: st.column_config.CheckboxColumn(
-            COL_ETP, help="Évapotranspiration Penman-Monteith"),
-    },
+    column_config={COL_UTIL: st.column_config.CheckboxColumn(COL_UTIL)},
 )
 
 
 def _extraire_choix(df_edit):
-    """Stations et variables retenues : case cochée ET donnée disponible."""
+    """Stations utilisées ; pour chaque variable demandée, seules celles qui ont la donnée."""
     cols = [c for c in ["NUM_POSTE", "NOM_USUEL", "LAT", "LON", "ALTI", "distance_km"]
             if c in di.columns]
-    sel = di[cols].copy()
-    ed = {c: df_edit[c].astype(bool).values for c in (COL_VENT, COL_METEO, COL_ETP)}
-    dispo = {"vent": di["vent_dispo"].astype(bool).values,
-             "meteo": di["meteo_dispo"].astype(bool).values,
-             "etp": di["etp_dispo"].astype(bool).values}
-    sel["vent"] = ed[COL_VENT] & dispo["vent"]
-    sel["meteo"] = ed[COL_METEO] & dispo["meteo"]
-    sel["etp"] = ed[COL_ETP] & dispo["etp"]
-    ignorees = []
-    for lib, col, cle in (("Vent", COL_VENT, "vent"), ("T° / précip.", COL_METEO, "meteo"),
-                          ("ETP", COL_ETP, "etp")):
-        manque = ed[col] & ~dispo[cle]
-        if manque.any():
-            ignorees.append(f"{lib} : " + ", ".join(di.loc[manque, "NOM_USUEL"].astype(str)))
-    sel = sel[sel[["vent", "meteo", "etp"]].any(axis=1)].reset_index(drop=True)
-    return sel, ignorees
+    utilise = df_edit[COL_UTIL].astype(bool).values
+    sel = di.loc[utilise, cols].copy()
+    sel["vent"] = di.loc[utilise, "vent_dispo"].astype(bool).values & veut_vent
+    sel["meteo"] = di.loc[utilise, "meteo_dispo"].astype(bool).values & veut_meteo
+    sel["etp"] = di.loc[utilise, "etp_dispo"].astype(bool).values & veut_etp
+    sel = sel.reset_index(drop=True)
+    manques = []
+    if len(sel):
+        for lib, veut, cle in (("Vent", veut_vent, "vent"), ("T° et précipitations", veut_meteo, "meteo"),
+                               ("ETP", veut_etp, "etp")):
+            if veut and not sel[cle].any():
+                manques.append(lib)
+    return sel, manques
 
 
-choix_courant, ignorees = _extraire_choix(df_choix)
-if ignorees:
-    st.caption("Cases ignorées faute de donnée — " + " | ".join(ignorees))
+choix_courant, manques = _extraire_choix(df_choix)
+if manques:
+    st.caption("Données non disponibles pour les stations cochées : " + ", ".join(manques) + ".")
 
 # Instantané au clic sur le bouton 2 : les résultats restent figés tant qu'on ne relance pas
 demande = st.session_state["demande_analyse"]
 if demande is not None:
     st.session_state["demande_analyse"] = None
-    if choix_courant.empty:
-        st.warning("Cochez au moins une variable sur au moins une station.")
+    if choix_courant.empty or not (veut_vent or veut_meteo or veut_etp):
+        st.warning("Cochez au moins une station et au moins un calcul.")
     else:
         st.session_state["choix_actif"] = choix_courant.copy()
         st.session_state["periode_active"] = demande
@@ -480,8 +472,8 @@ if demande is not None:
 
 choix = st.session_state["choix_actif"]
 if st.session_state["etape"] < 2 or st.session_state["periode_active"] is None or choix is None:
-    st.info("Cochez les calculs voulus, choisissez la période dans la barre latérale "
-            "puis cliquez sur '2 — Lancer l'analyse'.")
+    st.info("Cochez les calculs et les stations, choisissez la période dans la barre "
+            "latérale puis cliquez sur '2 — Lancer l'analyse'.")
     st.stop()
 
 if not choix_courant.reset_index(drop=True).equals(choix.reset_index(drop=True)):
@@ -629,16 +621,16 @@ def _usage(r):
         u.append("vent : non utilisé (SYNOP)" if use_synop else "vent : observations")
     if r["etp"]:
         u.append("ETP")
-    return " ; ".join(u)
+    return " ; ".join(u) if u else "aucune donnée pour les calculs choisis"
 
 
 df_recap = pd.DataFrame({
     "Code": choix["NUM_POSTE"].values,
     "Nom": choix["NOM_USUEL"].values,
     "Dist. (km)": choix["distance_km"].values,
-    COL_VENT: _oui_non(choix["vent"]).values,
-    COL_METEO: _oui_non(choix["meteo"]).values,
-    COL_ETP: _oui_non(choix["etp"]).values,
+    "Vent": _oui_non(choix["vent"]).values,
+    "T° / précip.": _oui_non(choix["meteo"]).values,
+    "ETP": _oui_non(choix["etp"]).values,
     "Utilisation": choix.apply(_usage, axis=1).values,
     "Réseau d'observation": "SYNOP" if use_synop else "Fichier horaire départemental",
 })
